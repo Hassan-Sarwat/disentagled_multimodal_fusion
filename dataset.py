@@ -1,4 +1,5 @@
 import numpy as np
+import math
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
@@ -6,7 +7,7 @@ import scipy.io as sio
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, random_split
 import torch.nn as nn
 
 
@@ -319,3 +320,152 @@ def CUB():
     # for v in range(len(data_X)):
     #     data_X[v] = data_X[v].T
     return MultiViewDataset("CUB", data_X, data_Y)
+
+def _rand_orthogonal(d, g):
+    M = torch.randn(d, d, generator=g)
+    Q, R = torch.linalg.qr(M)
+    Q = Q @ torch.diag(torch.sign(torch.diag(R)))
+    return Q
+
+
+class SimpleTwoModalPlus(Dataset):
+    """
+    Simple 2-modality dataset with tunable dependence (rho) + difficulty knobs.
+    NOW includes class-signal allocation:
+      - shared_class_frac in [0,1]: fraction of class signal placed into SHARED channel
+      - class_sep_shared: scale of shared class means
+      - class_sep_private: scale of PRIVATE class means (per modality)
+    Returns ONLY (X1, X2, y).
+    """
+    def __init__(
+        self,
+        n_samples=1000,
+        n_classes=3,
+        d_signal=16,
+        d_spurious=16,
+        rho=0.5,
+        # ---- NEW knobs for class-signal placement ----
+        shared_class_frac=1.0,     # <- set this to rho or to 0 when you want “no shared signal”
+        class_sep_shared=1.0,      # magnitude of SHARED class means
+        class_sep_private=1.0,     # magnitude of PRIVATE class means per modality
+        # ------------------------------------------------
+        alpha_shared=0.7,
+        beta_specific=0.6,
+        noise_std=0.8,
+        hetero_noise=True,
+        hetero_scale=0.5,
+        nonlinear_shared=True,
+        nonlinear_specific=False,
+        conflict_frac=0.5,
+        conflict_strength=0.8,
+        seed=0
+    ):
+        super().__init__()
+        assert 0.0 <= rho <= 1.0
+        assert 0.0 <= shared_class_frac <= 1.0
+        g = torch.Generator().manual_seed(seed)
+
+        y = torch.randint(0, n_classes, (n_samples,), generator=g)
+
+        # --- Dependence control on zero-mean base (signal dims only) ---
+        d = d_signal
+        S0 = torch.randn(n_samples, d, generator=g)
+        a = math.sqrt(rho)
+        E1 = torch.randn(S0.shape, generator=g)
+        E2 = torch.randn(S0.shape, generator=g)
+        G1 = a * S0 + math.sqrt(1 - a*a) * E1
+        G2 = a * S0 + math.sqrt(1 - a*a) * E2
+
+        # --- Class means: shared & private (per modality) ---
+        # Shared class mean (same “concept” for both; may be rotated in mod2)
+        mu_sh = torch.randn(n_classes, d, generator=g) * class_sep_shared
+        mu_sh_y = mu_sh[y]  # [n, d]
+
+        # Private class means (different per modality)
+        mu_p1 = torch.randn(n_classes, d, generator=g) * class_sep_private
+        mu_p2 = torch.randn(n_classes, d, generator=g) * class_sep_private
+        mu_p1_y = mu_p1[y]
+        mu_p2_y = mu_p2[y]
+
+        # --- Cross-modal conflict for shared class means in modality 2 only ---
+        conflict_mask = (torch.rand(n_classes, generator=g) < conflict_frac)
+        R_list = []
+        for c in range(n_classes):
+            if conflict_mask[c]:
+                Q = _rand_orthogonal(d, g)
+                R = (1.0 - conflict_strength) * torch.eye(d) + conflict_strength * Q
+            else:
+                R = torch.eye(d)
+            R_list.append(R)
+        R = torch.stack(R_list)     # [C, d, d]
+        R_y = R[y]                  # [n, d, d]
+        mu_sh_y_mod2 = torch.bmm(mu_sh_y.unsqueeze(1), R_y).squeeze(1)
+
+        # --- Private zero-mean parts ---
+        U1 = torch.randn(n_samples, d, generator=g)
+        U2 = torch.randn(n_samples, d, generator=g)
+
+        # --- Compose signal dims with ALLOCATION ---
+        sfrac = shared_class_frac  # fraction into shared
+        # Shared channels get sfrac * shared class mean
+        X1_shared = G1 + sfrac * mu_sh_y
+        X2_shared = G2 + sfrac * mu_sh_y_mod2
+        if nonlinear_shared:
+            X1_shared = torch.tanh(X1_shared)
+            X2_shared = torch.tanh(X2_shared)
+        X1_shared = alpha_shared * X1_shared
+        X2_shared = alpha_shared * X2_shared
+
+        # Private channels get (1 - sfrac) * private class means
+        pfrac = (1.0 - sfrac)
+        X1_spec = U1 + pfrac * mu_p1_y
+        X2_spec = U2 + pfrac * mu_p2_y
+        if nonlinear_specific:
+            X1_spec = torch.tanh(X1_spec)
+            X2_spec = torch.tanh(X2_spec)
+        X1_spec = beta_specific * X1_spec
+        X2_spec = beta_specific * X2_spec
+
+        # --- Spurious dims (uninformative) ---
+        if d_spurious > 0:
+            spur1 = torch.randn(n_samples, d_spurious, generator=g)
+            spur2 = torch.randn(n_samples, d_spurious, generator=g)
+            X1_sig = X1_shared + X1_spec
+            X2_sig = X2_shared + X2_spec
+            X1 = torch.cat([X1_sig, spur1], dim=1)
+            X2 = torch.cat([X2_sig, spur2], dim=1)
+        else:
+            X1 = X1_shared + X1_spec
+            X2 = X2_shared + X2_spec
+
+        # --- Observation noise ---
+        if hetero_noise:
+            m1 = 1.0 + hetero_scale * (2*torch.rand(n_samples, 1, generator=g) - 1.0)
+            m2 = 1.0 + hetero_scale * (2*torch.rand(n_samples, 1, generator=g) - 1.0)
+            noise1 = torch.randn(X1.shape, generator=g) * noise_std * m1
+            noise2 = torch.randn(X2.shape, generator=g) * noise_std * m2
+        else:
+            noise1 = torch.randn(X1.shape, generator=g) * noise_std
+            noise2 = torch.randn(X2.shape, generator=g) * noise_std
+
+        self.X1 = X1 + noise1
+        self.X2 = X2 + noise2
+        self.y = y
+
+        self.extras = {"G1": G1, "G2": G2, "mu_sh_y": mu_sh_y, "mu_p1_y": mu_p1_y, "mu_p2_y": mu_p2_y}
+
+    def __len__(self): return self.X1.shape[0]
+    def __getitem__(self, idx): return self.X1[idx], self.X2[idx], self.y[idx]
+
+def make_loaders_simple_plus(batch_size = 128, **kwargs):
+    ds = SimpleTwoModalPlus(**kwargs)
+    n = ds.X1.shape[0]
+    val_split = kwargs.get("val_split", 0.2)
+    seed = kwargs.get("seed", 0)
+    n_val = int(val_split * n)
+    n_train = n - n_val
+    g = torch.Generator().manual_seed(seed)
+    train_ds, val_ds = random_split(ds, [n_train, n_val], generator=g)
+    tl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    vl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=False)
+    return ds, tl, vl
