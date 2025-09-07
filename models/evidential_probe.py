@@ -10,14 +10,14 @@ import copy
 
 class EvidentialProbeModule(pl.LightningModule):
     def __init__(self,backbone,num_classes,input_dim,hidden_dim=(32),lr=1e-4,dropout=0.3,annealing_start=20,
-                 optimizer=torch.optim.Adam,freeze_backbone=True,aggregation='cml'):
+                 optimizer=torch.optim.Adam,freeze_backbone=True,aggregation='cml', fused=1):
         super().__init__()
         # Backbone & modality count
         self.backbone = copy.deepcopy(backbone)
         if not hasattr(self.backbone, 'N'):
             raise ValueError("backbone must expose attribute 'N' (number of modalities).")
         self.N = int(self.backbone.N)
-
+        self.fused = fused
         # Views = 1 (shared) + N (specific per modality)
         self.num_views = 1 + self.N
         self.num_classes = num_classes
@@ -99,7 +99,7 @@ class EvidentialProbeModule(pl.LightningModule):
         evidences_list = self(batch)                    # list length = 1 + N
         evidences = torch.stack(evidences_list, dim=1)  # (B, num_views, num_classes)
         evidences_a = self.agg(evidences)               # (B, num_classes), fusion is N-agnostic
-        loss = self.criterion(evidences, labels, evidences_a)
+        loss = self.criterion(evidences, labels, evidences_a, fused=self.fused)
         return loss, evidences_a, labels, evidences
 
     # ----------------- Training -----------------

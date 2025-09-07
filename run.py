@@ -1,24 +1,10 @@
-import os
-import numpy as np
 import pandas as pd
-from tqdm import tqdm
-from collections import OrderedDict
-from pprint import pprint
-
-import torch
-from torch.utils.data import DataLoader, random_split
-
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar, LambdaCallback
-from pytorch_lightning.loggers import WandbLogger
-import json
 from analysis import evaluate_subjective_model, evaluate_subjective_model_with_shared, build_metrics_dataframe
-from models.disentangledssl import DisentangledSSL
 from models.dmvae import DMVAE
 import models.baselines as baselines
-from models.evidential_probe import EvidentialProbeModule, DisentangledEvidentialProbeModule
-
-from dataset import  MultimodalDataset, generate_data_simple, make_loaders_simple_plus
+from models.evidential_probe import EvidentialProbeModule
+from dataset import make_loaders_simple_plus
 from classifiers import IdentityEncoder
 
 COMMON_MED = dict(
@@ -68,16 +54,16 @@ def train_dmvae(train_loader, seed, dep, a=1e-5,hidden_dim=512, embed_dim=16,lr=
     )
 
     trainer.fit(dmvae, train_dataloaders=train_loader)
-    dmvae_name = f'checkpoints1/dmvae_seed{seed}_dep{dep}_a{1e-5}_hd{hidden_dim}_lr{lr}_ed{embed_dim}.ckpt'
+    dmvae_name = f'checkpoints/dmvae_seed{seed}_dep{dep}_a{1e-5}_hd{hidden_dim}_lr{lr}_ed{embed_dim}.ckpt'
     trainer.save_checkpoint(dmvae_name)
     return dmvae
 
 def train_dmvae_fusion(dmvae, train_loader, test_loader, seed, dep, annealing_start=10, lr=3e-4,num_classes=3,
                         num_epochs=50,dropout=0.1, aggregation='cml',input_dim=16, hidden_dim=(128,)):
     
-    model_name = f'dmvae_fusion_seed{seed}_dep{dep}_agg{aggregation}_hd{hidden_dim}_lr{lr}.ckpt'
+    model_name = f'checkpoints/dmvae_fusion_seed{seed}_dep{dep}_agg{aggregation}_hd{hidden_dim}_lr{lr}.ckpt'
     dmvae_fusion = EvidentialProbeModule(backbone=dmvae,num_classes=num_classes, input_dim=input_dim, aggregation=aggregation, dropout=dropout,
-                annealing_start = annealing_start, lr=lr, hidden_dim=hidden_dim, freeze_backbone=True)
+                annealing_start = annealing_start, lr=lr, hidden_dim=hidden_dim, freeze_backbone=True, fused=0)
 
     trainer = pl.Trainer(
         accelerator="auto",
@@ -97,8 +83,8 @@ def train_latefusion(train_loader, test_loader, seed, dep, aggregation, annealin
                      hidden_dim=(128,), lr=3e-4, classifiers = [(IdentityEncoder, {}), (IdentityEncoder, {})], num_epochs=50):
     
     fusion = baselines.LateFusion(classifiers, output_dims, num_classes = num_classes, dropout=dropout, 
-                            aggregation=aggregation, annealing_start = annealing_start, lr=lr, hidden_dim=hidden_dim)
-    model_name = f'late_fusion_seed{seed}_dep{dep}_agg{aggregation}_hd{hidden_dim}_lr{lr}.ckpt'
+                            aggregation=aggregation, annealing_start = annealing_start, lr=lr, hidden_dim=hidden_dim, fused=0)
+    model_name = f'checkpoints/late_fusion_seed{seed}_dep{dep}_agg{aggregation}_hd{hidden_dim}_lr{lr}.ckpt'
     trainer = pl.Trainer(
         accelerator="auto",
         devices=1,
@@ -117,7 +103,7 @@ def train_latefusion(train_loader, test_loader, seed, dep, aggregation, annealin
 
 
 rows = {}
-for seed in [0,1,2]:
+for seed in [0,1,2,3,4,5]:
     rows[seed] = {}
     for dep in [0,25,50,75,100]:
         pl.seed_everything(seed)
@@ -133,5 +119,24 @@ for seed in [0,1,2]:
 
         avg_fusion = train_latefusion(train_loader, test_loader, seed, dep, aggregation='avg')
         rows[seed][dep]['avg'] = evaluate_subjective_model(avg_fusion, test_loader)
-        gc.collect()
-        torch.cuda.empty_cache()    
+
+
+
+df  = build_metrics_dataframe(rows)
+df['seed'] = df['seed'].astype(int)
+df['dep'] = df['dep'].astype(float)
+df_main = df[['seed','dep','model','view_0_evidence_mean','view_1_evidence_mean', 'shared_evidence_mean', 'fused_evidence_mean',
+                  'view_0_aleatoric_mean', 'view_1_aleatoric_mean','shared_aleatoric_mean','fused_aleatoric_mean',
+                  'view_0_epistemic_mean','view_1_epistemic_mean','shared_epistemic_mean','fused_epistemic_mean',
+                 'view_0_accuracy',  'view_1_accuracy', 'shared_accuracy', 'fused_accuracy']]
+
+df_grouped = df.groupby(['dep','model']).mean().reset_index()
+df_grouped.sort_values(by=['dep','model'],inplace=True)
+df_main_grouped = df_main.groupby(['dep','model']).mean().reset_index()
+df_main_grouped.sort_values(by=['dep','model'],inplace=True)
+with  pd.ExcelWriter('logs/synthetic_dataset.xlsx') as writer:
+    df_main_grouped.to_excel(writer, sheet_name='main_grouped',index=False)
+    df.to_excel(writer, sheet_name='all_results',index=False)
+    df_grouped.to_excel(writer,sheet_name='grouped_results',index=False)
+
+        

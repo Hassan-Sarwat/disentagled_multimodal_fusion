@@ -11,11 +11,12 @@ from common_fusions import Concat
 
 class LateFusion(pl.LightningModule):
     def __init__(self, feature_encoders, output_dims = [100,100],num_classes=42, dropout=0.3, aggregation='cml', lr=1e-4, annealing_start=20,
-                 hidden_dim=(32), optimizer=torch.optim.Adam, weight_decay=1e-5):
+                 hidden_dim=(32), optimizer=torch.optim.Adam, weight_decay=1e-5, fused=1):
         super(LateFusion, self).__init__()
         self.num_classes = num_classes
         self.lr = lr
         self.optimizer = optimizer
+        self.fused  = fused
         self.feature_encoders = nn.ModuleList([i[0](**i[1]) for i in feature_encoders])
         self.weight_decay = weight_decay
         
@@ -65,7 +66,7 @@ class LateFusion(pl.LightningModule):
              evidences, dim=1
         )
         evidences_a = self.aggregation(evidences)
-        loss = self.criterion(evidences, target, evidences_a)
+        loss = self.criterion(evidences, target, evidences_a, fused=self.fused)
         return loss, evidences_a, target, evidences
 
     def validation_step(self, batch, batch_idx):
@@ -141,8 +142,7 @@ class LateFusion(pl.LightningModule):
     
     def configure_optimizers(self):
         optimizer = self.optimizer(self.parameters(), lr=self.lr)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10,
-                                                               verbose=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10)
         return {
             'optimizer': optimizer,
             'lr_scheduler': scheduler,
@@ -244,8 +244,7 @@ class IntermediateFusion(pl.LightningModule):
     
     def configure_optimizers(self):
         optimizer = self.optimizer(self.parameters(), lr=self.lr)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5,
-                                                               verbose=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5)
         return {
             'optimizer': optimizer,
             'lr_scheduler': scheduler,

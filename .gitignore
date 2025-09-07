@@ -1,2 +1,7 @@
-dmfu/
-data/
+dmfu
+data
+__pycache__
+lightning_logs
+logs
+checkpoints
+*.ckpt

@@ -214,7 +214,7 @@ class AvgTrustedLoss(nn.Module):
         self.annealing_start = annealing_start
         self.gamma = gamma
 
-    def forward(self, evidences, target, evidence_a, **kwargs):
+    def forward(self, evidences, target, evidence_a, fused=1,**kwargs):
 
         # evidences: [B, V, C], evidence_a: [B, C], target: [B]
         B, V, C = evidences.shape
@@ -225,7 +225,7 @@ class AvgTrustedLoss(nn.Module):
         # 1) fused branch (unchanged)
         loss_fused = edl_digamma_loss(evidence_a + 1, target_1h,
                                     self.annealing_step, C, self.annealing_start, device)
-        # loss_fused = 0
+        loss_fused *=  fused
 
         # 2) vectorized per-view branch
         alpha_flat   = (evidences + 1).reshape(B * V, C)              # [B*V, C]
@@ -244,7 +244,7 @@ class AvgTrustedLoss(nn.Module):
         gamma_t = 0.2 * (1 - t) + self.gamma * t   # 0.2 → gamma by epoch ~annealing_start
         dc_loss = get_dc_loss_vectorized(evidences)
 
-        loss = loss_acc  + gamma_t * dc_loss
+        loss = loss_acc  + (gamma_t * dc_loss * fused)
         return loss
     
 class SingleEvidentialLoss(nn.Module):
