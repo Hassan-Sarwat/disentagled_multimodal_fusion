@@ -497,3 +497,103 @@ def build_metrics_dataframe(nested: Dict[Any, Dict[Any, Dict[str, Dict[str, Any]
     other_cols = sorted([c for c in df.columns if c not in id_cols])
     return df[id_cols + other_cols]
 
+
+def build_metrics_dataframe_datasets(nested: Dict[Any, Dict[Any, Dict[str, Dict[str, Any]]]]) -> pd.DataFrame:
+    """
+    Convert:
+        nested[seed][pct][model] = sample_info_dict
+    into a tidy DataFrame.
+    """
+    rows = []
+    for seed, d_pct in nested.items():
+        for typ, d_ds in d_pct.items():
+            for ds, d_model in d_ds.items(): 
+                for model, sample_info in d_model.items():
+                    rows.append(flatten_sample_info_datasets(sample_info, seed=seed, typ=typ, ds=ds, model=model))
+    df = pd.DataFrame(rows)
+
+    id_cols = ["seed", "type","dataset", "model"]
+    other_cols = sorted([c for c in df.columns if c not in id_cols])
+    return df[id_cols + other_cols]
+
+def flatten_sample_info_datasets(
+    sample_info: Dict[str, Any],
+    *,
+    seed: Union[int, str],
+    typ: str,
+    ds:str,
+    model: str
+) -> Dict[str, Any]:
+    """
+    Flatten a single 'Sample information' dict to one row.
+    Supports:
+      - fused metrics (prefix 'fused_')
+      - shared metrics (prefix 'shared_')         <-- NEW
+      - per-view metrics (prefix 'view_{i}_')
+      - per-class evidence (unconditional & true_class) for fused/shared/per-view
+    """
+    row = {"seed": seed, "type": typ, "dataset": ds,'model':model}
+
+    # ---- helper to flatten a metrics dict into row with a given prefix ----
+    def add_block(prefix: str, block: Dict[str, Any]):
+        if not isinstance(block, dict): 
+            return
+        for k in ["accuracy", "evidence_mean", "epistemic_mean", "aleatoric_mean"]:
+            if k in block:
+                row[f"{prefix}{k}"] = float(block[k])
+        inc = block.get("incorrect_only", {})
+        for k in ["evidence_mean", "epistemic_mean", "aleatoric_mean"]:
+            if k in inc:
+                row[f"{prefix}incorrect_only_{k}"] = float(inc[k])
+
+    # ---- fused block (unchanged) ----
+    add_block("fused_", sample_info.get("fused", {}))
+
+    # ---- NEW: shared block ----
+    add_block("shared_", sample_info.get("shared", {}))
+
+    # ---- per-view blocks (view_0, view_1, ...) ----
+    per_view = sample_info.get("per_view", [])
+    for i, v in enumerate(per_view):
+        add_block(f"view_{i}_", v)
+
+    # ---- per-class evidence ----
+    pce = sample_info.get("per_class_evidence", {})
+    uncond = pce.get("unconditional", {})
+    truec  = pce.get("true_class", {})
+
+    # fused per-class
+    fused_uncond = uncond.get("fused")
+    if isinstance(fused_uncond, (list, tuple)):
+        for k, val in enumerate(fused_uncond):
+            row[f"fused_per_class_evidence_class_{k}"] = float(val)
+    fused_truec = truec.get("fused")
+    if isinstance(fused_truec, (list, tuple)):
+        for k, val in enumerate(fused_truec):
+            row[f"fused_per_class_evidence_true_class_{k}"] = float(val)
+
+    # NEW: shared per-class
+    shared_uncond = uncond.get("shared")
+    if isinstance(shared_uncond, (list, tuple)):
+        for k, val in enumerate(shared_uncond):
+            row[f"shared_per_class_evidence_class_{k}"] = float(val)
+    shared_truec = truec.get("shared")
+    if isinstance(shared_truec, (list, tuple)):
+        for k, val in enumerate(shared_truec):
+            row[f"shared_per_class_evidence_true_class_{k}"] = float(val)
+
+    # per-view per-class (lists of arrays)
+    view_uncond = uncond.get("per_view", [])
+    for i, arr in enumerate(view_uncond):
+        if isinstance(arr, (list, tuple)):
+            for k, val in enumerate(arr):
+                row[f"view_{i}_per_class_evidence_class_{k}"] = float(val)
+
+    view_truec = truec.get("per_view", [])
+    for i, arr in enumerate(view_truec):
+        if isinstance(arr, (list, tuple)):
+            for k, val in enumerate(arr):
+                row[f"view_{i}_per_class_evidence_true_class_{k}"] = float(val)
+
+    return row
+

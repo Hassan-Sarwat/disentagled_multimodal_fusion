@@ -1,142 +1,285 @@
+import os
+import numpy as np
 import pandas as pd
+from tqdm import tqdm
+from collections import OrderedDict
+from pprint import pprint
+import wandb
+from dotenv import load_dotenv
+
+import torch
+from torch.utils.data import DataLoader, Subset, random_split
+
 import pytorch_lightning as pl
-from analysis import evaluate_subjective_model, evaluate_subjective_model_with_shared, build_metrics_dataframe
-from models.dmvae import DMVAE
+from pytorch_lightning.loggers import WandbLogger
+import json
 import models.baselines as baselines
-from models.evidential_probe import EvidentialProbeModule
-from dataset import make_loaders_simple_plus
+from dataset import CUB, Caltech, HandWritten, PIE, Scene
 from classifiers import IdentityEncoder
+from analysis import evaluate_subjective_model, evaluate_subjective_model_with_shared, build_metrics_dataframe_datasets
+from  models.dmvae import DMVAE
+from models.evidential_probe  import EvidentialProbeModule, DisentangledEvidentialProbeModule
 
-COMMON_MED = dict(
-    n_samples=10000,
-    d_signal=16,
-    d_spurious=16,          # ↓ distractors
-    alpha_shared=0.7,
-    beta_specific=0.6,
-    class_sep_shared=1.1,   # ↑ separation a bit
-    class_sep_private=0.9,  # ↑ private separation a bit
-    noise_std=0.7,          # ↓ noise
-    hetero_noise=True,
-    hetero_scale=0.4,       # ↓ heteroscedasticity
-    nonlinear_shared=True,
-    nonlinear_specific=False, # turn off private nonlinearity
-    conflict_frac=0.4,      # fewer conflict classes
-    conflict_strength=0.7,  # softer conflict
-)
-
-def make_dep_loader_med(dep_percent, seed=7, **overrides):
-    rho = dep_percent / 100.0
-    return make_loaders_simple_plus(
-        seed=seed,
-        rho=rho,
-        shared_class_frac=rho,     # keep class sharing tied to dependence
-        **{**COMMON_MED, **overrides}
-    )
+load_dotenv()
+api_key = os.getenv('WAND_API_KEY')
+wandb.login(key=api_key)
 
 
-def train_dmvae(train_loader, seed, dep, a=1e-5,hidden_dim=512, embed_dim=16,lr=1e-3, output_dim=[32,32], num_epochs=100):
-    dmvae = DMVAE(
-    output_dim=output_dim,     # match X1/X2 dims
-    hidden_dim=hidden_dim,          # 256 if inputs ~100-D
-    embed_dim=embed_dim,             # match ds=8
-    lr=lr,                 # AdamW; keep weight_decay=1e-4 in optimizer
-    a=a,                   # with KL warm-up 0→1 over first 30% epochs
-    num_epochs=num_epochs
-    )
-
-    trainer = pl.Trainer(
-        accelerator="auto",
-        devices=1,
-        max_epochs=num_epochs,
-        log_every_n_steps=20, # For speed
-        enable_progress_bar=False,
-        enable_model_summary=False,
-    )
-
-    trainer.fit(dmvae, train_dataloaders=train_loader)
-    dmvae_name = f'checkpoints/dmvae_seed{seed}_dep{dep}_a{1e-5}_hd{hidden_dim}_lr{lr}_ed{embed_dim}.ckpt'
-    trainer.save_checkpoint(dmvae_name)
-    return dmvae
-
-def train_dmvae_fusion(dmvae, train_loader, test_loader, seed, dep, annealing_start=10, lr=3e-4,num_classes=3,
-                        num_epochs=50,dropout=0.1, aggregation='cml',input_dim=16, hidden_dim=(128,)):
+def get_normal_data(dataset_name, batch_size):
+    if dataset_name == 'CUB':
+        dataset = CUB()
+    elif dataset_name == 'CalTech':
+        dataset = Caltech()
+    elif dataset_name == 'HandWritten':
+        dataset = HandWritten()
+    elif dataset_name == 'PIE':
+        dataset = PIE()
+    elif dataset_name == 'Scene':
+        dataset = Scene()
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
     
-    model_name = f'checkpoints/dmvae_fusion_seed{seed}_dep{dep}_agg{aggregation}_hd{hidden_dim}_lr{lr}.ckpt'
-    dmvae_fusion = EvidentialProbeModule(backbone=dmvae,num_classes=num_classes, input_dim=input_dim, aggregation=aggregation, dropout=dropout,
-                annealing_start = annealing_start, lr=lr, hidden_dim=hidden_dim, freeze_backbone=True, fused=0)
+    num_samples = len(dataset)
+    num_classes = dataset.num_classes
+    num_views = dataset.num_views
+    dims = list(np.squeeze(dataset.dims))
+    index = np.arange(num_samples)
+    np.random.shuffle(index)
+    train_index, test_index = index[:int(0.8 * num_samples)], index[int(0.8 * num_samples):]
 
-    trainer = pl.Trainer(
-        accelerator="auto",
-        devices=1,
-        max_epochs=num_epochs,
-        log_every_n_steps=20, # For speed
-        enable_progress_bar=True,
-        enable_model_summary=False,
-    )
 
-    # Lightning will call model.training_step & model.validation_step
-    trainer.fit(dmvae_fusion, train_dataloaders=train_loader, val_dataloaders=test_loader)
-    trainer.save_checkpoint(model_name)
-    return dmvae_fusion
+    train_loader = DataLoader(Subset(dataset, train_index), batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(Subset(dataset, test_index), batch_size=batch_size, shuffle=False)
+    return train_loader, test_loader, num_classes, num_views, dims
 
-def train_latefusion(train_loader, test_loader, seed, dep, aggregation, annealing_start=10, dropout=0.1, output_dims=[32,32],num_classes=3,
-                     hidden_dim=(128,), lr=3e-4, classifiers = [(IdentityEncoder, {}), (IdentityEncoder, {})], num_epochs=50):
+def get_conflict_data(dataset_name, batch_size):
+    if dataset_name == 'CUB':
+        dataset = CUB()
+    elif dataset_name == 'CalTech':
+        dataset = Caltech()
+    elif dataset_name == 'HandWritten':
+        dataset = HandWritten()
+    elif dataset_name == 'PIE':
+        dataset = PIE()
+    elif dataset_name == 'Scene':
+        dataset = Scene()
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
     
-    fusion = baselines.LateFusion(classifiers, output_dims, num_classes = num_classes, dropout=dropout, 
-                            aggregation=aggregation, annealing_start = annealing_start, lr=lr, hidden_dim=hidden_dim, fused=0)
-    model_name = f'checkpoints/late_fusion_seed{seed}_dep{dep}_agg{aggregation}_hd{hidden_dim}_lr{lr}.ckpt'
-    trainer = pl.Trainer(
-        accelerator="auto",
-        devices=1,
-        max_epochs=num_epochs,
-        log_every_n_steps=20, # For speed
-        enable_progress_bar=True,
-        enable_model_summary=False,
-    )
+    num_samples = len(dataset)
+    num_classes = dataset.num_classes
+    num_views = dataset.num_views
+    dims = list(np.squeeze(dataset.dims))
+    index = np.arange(num_samples)
+    np.random.shuffle(index)
+    train_index, test_index = index[:int(0.8 * num_samples)], index[int(0.8 * num_samples):]
 
-    # Lightning will call model.training_step & model.validation_step
-    trainer.fit(fusion, train_dataloaders=train_loader, val_dataloaders=test_loader)
-    trainer.save_checkpoint(model_name)
-    return fusion
+    # create a test set with conflict instances
+    dataset.postprocessing(test_index, addNoise=False, sigma=0.5, ratio_noise=0.0, addConflict=True, ratio_conflict=1.0)
 
+    train_loader = DataLoader(Subset(dataset, train_index), batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(Subset(dataset, test_index), batch_size=batch_size, shuffle=False)
+    return train_loader, test_loader, num_classes, num_views, dims
+
+
+seeds = [0,1,2,3,4]
+batch_size = 100
+
+model_parameters ={
+"dropout_p" : 0.1,
+"annealing_start" : 50,
+"model_epochs":200,
+"model_hidden_dim" : (128,)
+}
+
+dataset_lr = {'CalTech':0.0003,'Scene':0.01,'CUB':0.003,'HandWritten':0.003,'PIE':0.003}
 
 
 
 rows = {}
-for seed in [0,1,2,3,4,5]:
+for seed in seeds:
+    pl.seed_everything(seed)
     rows[seed] = {}
-    for dep in [0,25,50,75,100]:
-        pl.seed_everything(seed)
-        rows[seed][dep] = {}
-        ds, train_loader, test_loader = make_dep_loader_med(dep, seed=seed)
-        dmvae = train_dmvae(train_loader, seed, dep, a=1e-5,)
+    ###  Normal Loop
+    rows[seed]['Normal'] =  {}
+    for dataset_name in ['CUB']:#, 'CalTech', 'HandWritten', 'PIE', 'Scene']:
+        rows[seed]['Normal'][dataset_name] = {}
+        train_loader, test_loader, num_classes, num_views, dims = get_normal_data(dataset_name, batch_size)
+        model_parameters["classes"] = num_classes
+        model_parameters["output_dims"] = dims
+        model_parameters['classifiers'] = [(IdentityEncoder, {}) for i in range(len(dims))]
+        model_parameters['lr']  = dataset_lr[dataset_name]
 
-        dmvae_fusion = train_dmvae_fusion(dmvae,train_loader, test_loader, seed, dep)
-        rows[seed][dep]['dmvae_cml'] = evaluate_subjective_model_with_shared(dmvae_fusion, test_loader)
+        dmvae_model = DMVAE(feature_encoders=model_parameters['classifiers'], output_dim=model_parameters['output_dims'], dropout=0, a=1e-5, hidden_dim=512,  
+                        embed_dim=200, lr=1e-4, num_epochs=100)
         
-        cml_fusion = train_latefusion(train_loader, test_loader, seed, dep, aggregation='cml')
-        rows[seed][dep]['cml'] = evaluate_subjective_model(cml_fusion, test_loader)
 
-        avg_fusion = train_latefusion(train_loader, test_loader, seed, dep, aggregation='avg')
-        rows[seed][dep]['avg'] = evaluate_subjective_model(avg_fusion, test_loader)
+        trainer = pl.Trainer(
+            accelerator="auto",
+            max_epochs=100,
+            enable_progress_bar=True,
+            log_every_n_steps=20,
+        )
+        trainer.fit(dmvae_model, train_dataloaders=train_loader)
+        model_name = f'dmvae_dataset{dataset_name}_seed{seed}_a{1e-5}_normal'
+        path = f'checkpoints/{model_name}.ckpt'
+        trainer.save_checkpoint(path)
+
+        dis_dmvae_model = DisentangledEvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
+                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'],  input_dim=200)
+        cml_dmvae_model = EvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
+                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'], aggregation='cml', input_dim=200)
+        joint_dmvae_model =  EvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
+                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'], aggregation='joint', input_dim=200)
+        
+        dbf_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
+                            aggregation='dbf', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
+        cml_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
+                            aggregation='cml', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
+        avg_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
+                            aggregation='avg', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
+        
+        models = [dis_dmvae_model, cml_dmvae_model, joint_dmvae_model, dbf_fusion, cml_fusion, avg_fusion]
+        model_names = ['dmvae_dis','dmvae_cml','dmvae_joint','dbf_fusion','cml_fusion','avg_fusion']
+        
+        
+        for model, name in zip(models, model_names):
+            model_name = f'{name}_fusion_ds{dataset_name}_seed{seed}'
+            print(f'Training model {model_name}')
+            tags=[name,str(seed), dataset_name,'Normal']
+            model_parameters.update({"dataset": dataset_name, "seed": seed,'aggregation':name ,'UQ':'Normal'})
+            wandb_logger = WandbLogger(
+                project="MDU",
+                entity="hassan-sarwat-technical-university-of-munich",
+                name=model_name,
+                tags=tags,
+                log_model=True,
+                config=model_parameters,
+            )
+
+            gpus = 1 if torch.cuda.is_available() else 0
+            trainer = pl.Trainer(
+                accelerator="auto" if gpus else "cpu",
+                devices=gpus if gpus else None,
+                max_epochs=model_parameters['model_epochs'],
+                log_every_n_steps=20, # For speed
+                enable_progress_bar=True,
+                enable_model_summary=False,
+                logger=wandb_logger        # turn off TensorBoard for brevity
+            )
+
+            # Lightning will call model.training_step & model.validation_step
+            trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=test_loader)
+            # Load best checkpoint after training
+            # Test best model on the test set
+            test_metrics = trainer.test(model, dataloaders=test_loader, verbose=False)
+            path = f'checkpoints/{model_name}.ckpt'
+            trainer.save_checkpoint(path)
+            print(f'Model {model_name}')
+            pprint(test_metrics)
+            if name == 'dmvae_dis':
+                rows[seed]['Normal'][dataset_name][name] = evaluate_subjective_model(model, test_loader)
+            else:    
+                rows[seed]['Normal'][dataset_name][name] = evaluate_subjective_model_with_shared(model, test_loader)
+            rows[seed]['Normal'][dataset_name][name].update({'path':path})
+            # wandb_logger.log_metrics(test_metrics, step=trainer.global_step)
+            wandb_logger.experiment.finish()
+
+    rows[seed]['Conflict'] = {}
+    for dataset_name in ['CUB']:#, 'CalTech', 'HandWritten', 'PIE', 'Scene']:
+        rows[seed]['Conflict'][dataset_name] = {}
+        train_loader, test_loader, num_classes, num_views, dims = get_conflict_data(dataset_name, batch_size)
+        model_parameters["classes"] = num_classes
+        model_parameters["output_dims"] = dims
+        model_parameters['classifiers'] = [(IdentityEncoder, {}) for _ in range(len(dims))]
+        model_parameters['lr']  = dataset_lr[dataset_name]
+
+        dmvae_model = DMVAE(feature_encoders=model_parameters['classifiers'], output_dim=model_parameters['output_dims'], dropout=0, a=1e-5, hidden_dim=512,  
+                        embed_dim=200, lr=1e-4, num_epochs=100)
+        
+
+        trainer = pl.Trainer(
+            accelerator="auto",
+            max_epochs=100,
+            enable_progress_bar=True,
+            log_every_n_steps=20,
+        )
+        trainer.fit(dmvae_model, train_dataloaders=train_loader)
+        model_name = f'dmvae_dataset{dataset_name}_seed{seed}_a{1e-5}_conflict'
+        path = f'checkpoints/{model_name}.ckpt'
+        trainer.save_checkpoint(path)
+
+        dis_dmvae_model = DisentangledEvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
+                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'],  input_dim=200)
+        cml_dmvae_model = EvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
+                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'], aggregation='cml', input_dim=200)
+        joint_dmvae_model =  EvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
+                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'], aggregation='joint', input_dim=200)
+        
+        dbf_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
+                            aggregation='dbf', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
+        cml_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
+                            aggregation='cml', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
+        avg_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
+                            aggregation='avg', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
+        
+        models = [dis_dmvae_model, cml_dmvae_model, joint_dmvae_model, dbf_fusion, cml_fusion, avg_fusion]
+        model_names = ['dmvae_dis','dmvae_cml','dmvae_joint','dbf_fusion','cml_fusion','avg_fusion']
+
+        for model, name in zip(models,model_names):
+            model_name = f'{name}_fusion_ds{dataset_name}_seed{seed}_conflict'
+            print(f'Training model {model_name}')
+            tags=[name,str(seed),dataset_name,'Conflict']
+            model_parameters.update({"dataset": dataset_name, "seed": seed,'aggregation':name, 'UQ':'Conflict'})
+            wandb_logger = WandbLogger(
+                project="MDU",
+                entity="hassan-sarwat-technical-university-of-munich",
+                name=model_name,
+                tags=tags,
+                log_model=True,
+                config=model_parameters,
+            )
+            gpus = 1 if torch.cuda.is_available() else 0
+            trainer = pl.Trainer(
+                accelerator="auto" if gpus else "cpu",
+                devices=gpus if gpus else None,
+                max_epochs=model_parameters['model_epochs'],
+                log_every_n_steps=20, # For speed
+                enable_progress_bar=True,
+                enable_model_summary=False,
+                logger=wandb_logger        # turn off TensorBoard for brevity
+            )
+
+            trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=test_loader)
+            test_metrics = trainer.test(model, dataloaders=test_loader, verbose=False)
+            path = f'checkpoints/{model_name}.ckpt'
+            trainer.save_checkpoint(path)
+            print(f'Model {model_name}')
+            pprint(test_metrics)
+            if name == 'dmvae_dis':
+                rows[seed]['Conflict'][dataset_name][name] = evaluate_subjective_model(model, test_loader)
+            else:    
+                rows[seed]['Conflict'][dataset_name][name] = evaluate_subjective_model_with_shared(model, test_loader)
+            rows[seed]['Conflict'][dataset_name][name].update({'path':path})
+            # wandb_logger.log_metrics(test_metrics, step=trainer.global_step)
+            wandb_logger.experiment.finish()
 
 
-
-df  = build_metrics_dataframe(rows)
+df = build_metrics_dataframe_datasets(rows)
 df['seed'] = df['seed'].astype(int)
-df['dep'] = df['dep'].astype(float)
-df_main = df[['seed','dep','model','view_0_evidence_mean','view_1_evidence_mean', 'shared_evidence_mean', 'fused_evidence_mean',
+df_main = df[['seed','type','dataset','model','view_0_evidence_mean','view_1_evidence_mean', 'shared_evidence_mean', 'fused_evidence_mean',
                   'view_0_aleatoric_mean', 'view_1_aleatoric_mean','shared_aleatoric_mean','fused_aleatoric_mean',
                   'view_0_epistemic_mean','view_1_epistemic_mean','shared_epistemic_mean','fused_epistemic_mean',
                  'view_0_accuracy',  'view_1_accuracy', 'shared_accuracy', 'fused_accuracy']]
 
-df_grouped = df.groupby(['dep','model']).mean().reset_index()
-df_grouped.sort_values(by=['dep','model'],inplace=True)
-df_main_grouped = df_main.groupby(['dep','model']).mean().reset_index()
-df_main_grouped.sort_values(by=['dep','model'],inplace=True)
-with  pd.ExcelWriter('logs/synthetic_dataset.xlsx') as writer:
+df_grouped = df.groupby(['type','dataset','model']).mean().reset_index()
+df_grouped.sort_values(by=['type','dataset','model'],inplace=True)
+df_main_grouped = df_main.groupby(['type','dataset','model']).mean().reset_index()
+df_main_grouped.sort_values(by=['type','dataset','model'],inplace=True)
+with  pd.ExcelWriter('logs/dataset_analysis.xlsx') as writer:
     df_main_grouped.to_excel(writer, sheet_name='main_grouped',index=False)
     df.to_excel(writer, sheet_name='all_results',index=False)
     df_grouped.to_excel(writer,sheet_name='grouped_results',index=False)
 
-        
+
+
