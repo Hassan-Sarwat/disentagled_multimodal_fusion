@@ -4,6 +4,8 @@ import pandas as pd
 from tqdm import tqdm
 from collections import OrderedDict
 from pprint import pprint
+from pathlib import Path
+import yaml
 import wandb
 from dotenv import load_dotenv
 
@@ -19,80 +21,163 @@ from classifiers import IdentityEncoder
 from analysis import evaluate_subjective_model, evaluate_subjective_model_with_shared, build_metrics_dataframe_datasets
 from  models.dmvae import DMVAE
 from models.evidential_probe  import EvidentialProbeModule, DisentangledEvidentialProbeModule
+from functools import partial
 
 load_dotenv()
 api_key = os.getenv('WAND_API_KEY')
 wandb.login(key=api_key)
 
+CFG_PATH = Path("configs/config.yaml")
+with open(CFG_PATH, "r") as f:
+    cfg = yaml.safe_load(f)
 
-def get_normal_data(dataset_name, batch_size):
-    if dataset_name == 'CUB':
-        dataset = CUB()
-    elif dataset_name == 'CalTech':
-        dataset = Caltech()
-    elif dataset_name == 'HandWritten':
-        dataset = HandWritten()
-    elif dataset_name == 'PIE':
-        dataset = PIE()
-    elif dataset_name == 'Scene':
-        dataset = Scene()
+def C(path, default=None):
+    """Dot-path getter with default: C('probes.dropout_p', 0.1)"""
+    cur = cfg
+    for p in path.split("."):
+        if not isinstance(cur, dict) or p not in cur:
+            return default
+        cur = cur[p]
+    return cur
+
+def _get_dataset(dataset_name):
+    if dataset_name == "CUB":
+        return CUB()
+    elif dataset_name == "CalTech":
+        return Caltech()
+    elif dataset_name == "HandWritten":
+        return HandWritten()
+    elif dataset_name == "PIE":
+        return PIE()
+    elif dataset_name == "Scene":
+        return Scene()
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
-    
-    num_samples = len(dataset)
+
+def _split_indices(n, train_frac):
+    idx = np.arange(n)
+    np.random.shuffle(idx)  # numpy rng is seeded by pl.seed_everything(seed)
+    n_train = int(train_frac * n)
+    return idx[:n_train], idx[n_train:]
+
+
+def get_normal_data(dataset_name):
+    batch_size = C("dataloader.batch_size", 100)
+    num_workers = C("dataloader.num_workers", 0)
+    train_frac = C("data.split.train_frac", 0.8)
+
+    dataset = _get_dataset(dataset_name)
+    n = len(dataset)
+    train_idx, test_idx = _split_indices(n, train_frac)
+
+    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True,  num_workers=num_workers)
+    test_loader  = DataLoader(Subset(dataset, test_idx),  batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
     num_classes = dataset.num_classes
-    num_views = dataset.num_views
-    dims = list(np.squeeze(dataset.dims))
-    index = np.arange(num_samples)
-    np.random.shuffle(index)
-    train_index, test_index = index[:int(0.8 * num_samples)], index[int(0.8 * num_samples):]
-
-
-    train_loader = DataLoader(Subset(dataset, train_index), batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(Subset(dataset, test_index), batch_size=batch_size, shuffle=False)
+    num_views   = dataset.num_views
+    dims        = list(np.squeeze(dataset.dims))
     return train_loader, test_loader, num_classes, num_views, dims
 
-def get_conflict_data(dataset_name, batch_size):
-    if dataset_name == 'CUB':
-        dataset = CUB()
-    elif dataset_name == 'CalTech':
-        dataset = Caltech()
-    elif dataset_name == 'HandWritten':
-        dataset = HandWritten()
-    elif dataset_name == 'PIE':
-        dataset = PIE()
-    elif dataset_name == 'Scene':
-        dataset = Scene()
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-    
-    num_samples = len(dataset)
+def get_conflict_data(dataset_name):
+    batch_size = C("dataloader.batch_size", 100)
+    num_workers = C("dataloader.num_workers", 0)
+    train_frac = C("data.split.train_frac", 0.8)
+
+    dataset = _get_dataset(dataset_name)
+    n = len(dataset)
+    train_idx, test_idx = _split_indices(n, train_frac)
+
+    # Conflict/post-processing controls from YAML
+    pp = C("data.conflict", {})
+    dataset.postprocessing(
+        test_idx,
+        addNoise=pp.get("addNoise", False),
+        sigma=pp.get("sigma", 0.5),
+        ratio_noise=pp.get("ratio_noise", 0.0),
+        addConflict=pp.get("addConflict", True),
+        ratio_conflict=pp.get("ratio_conflict", 1.0),
+    )
+
+    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True,  num_workers=num_workers)
+    test_loader  = DataLoader(Subset(dataset, test_idx),  batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
     num_classes = dataset.num_classes
-    num_views = dataset.num_views
-    dims = list(np.squeeze(dataset.dims))
-    index = np.arange(num_samples)
-    np.random.shuffle(index)
-    train_index, test_index = index[:int(0.8 * num_samples)], index[int(0.8 * num_samples):]
-
-    # create a test set with conflict instances
-    dataset.postprocessing(test_index, addNoise=False, sigma=0.5, ratio_noise=0.0, addConflict=True, ratio_conflict=1.0)
-
-    train_loader = DataLoader(Subset(dataset, train_index), batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(Subset(dataset, test_index), batch_size=batch_size, shuffle=False)
+    num_views   = dataset.num_views
+    dims        = list(np.squeeze(dataset.dims))
     return train_loader, test_loader, num_classes, num_views, dims
 
 
-seeds = [0,1,2,3,4]
-batch_size = 100
+seeds = C("experiment.seeds", [0, 1, 2, 3, 4])
+normal_datasets   = C("experiment.normal_datasets",   ['CUB', 'CalTech', 'HandWritten', 'PIE', 'Scene'])
+conflict_datasets = C("experiment.conflict_datasets", ['CUB', 'CalTech', 'HandWritten', 'PIE', 'Scene'])
 
-model_parameters ={
-"dropout_p" : 0.1,
-"annealing_start" : 50,
-"model_epochs":200,
-"model_hidden_dim" : (128,)
+dataset_lr = C("optim.dataset_lr", {
+    "CalTech": 0.0003, "Scene": 0.01, "CUB": 0.003, "HandWritten": 0.003, "PIE": 0.003
+})
+
+model_parameters = {
+    "dropout_p":       C("probes.dropout_p", 0.1),
+    "annealing_start": C("probes.annealing_start", 50),
+    "model_epochs":    C("probes.model_epochs", 200),
+    "model_hidden_dim": tuple(C("probes.model_hidden_dim", (128,))),
 }
 
-dataset_lr = {'CalTech':0.0003,'Scene':0.01,'CUB':0.003,'HandWritten':0.003,'PIE':0.003}
+probe_input_dim = C("probes.input_dim", 200)
+
+dmvae_kwargs = {
+    "dropout":    C("dmvae.dropout", 0),
+    "a":          C("dmvae.a", 1e-5),
+    "hidden_dim": C("dmvae.hidden_dim", 512),
+    "embed_dim":  C("dmvae.embed_dim", 200),
+    "lr":         C("dmvae.lr", 1e-4),
+    "num_epochs": C("dmvae.num_epochs", 100),
+}
+
+dataset_lr = C("optim.dataset_lr", {
+    "CalTech": 0.0003, "Scene": 0.01, "CUB": 0.003, "HandWritten": 0.003, "PIE": 0.003
+})
+
+def build_factories(model_params, probe_input_dim, dmvae_kwargs):
+    DMVAEFactory = partial(
+        DMVAE,
+        feature_encoders=model_params["classifiers"],
+        output_dim=model_params["output_dims"],
+        dropout=dmvae_kwargs["dropout"],
+        a=dmvae_kwargs["a"],
+        hidden_dim=dmvae_kwargs["hidden_dim"],
+        embed_dim=dmvae_kwargs["embed_dim"],
+        lr=dmvae_kwargs["lr"],
+        num_epochs=dmvae_kwargs["num_epochs"],
+    )
+    ProbeFactory = partial(
+        EvidentialProbeModule,
+        num_classes=model_params["classes"],
+        lr=model_params["lr"],
+        annealing_start=model_params["annealing_start"],
+        hidden_dim=model_params["model_hidden_dim"],
+        dropout=model_params["dropout_p"],
+        input_dim=probe_input_dim,
+    )
+    DisProbeFactory = partial(
+        DisentangledEvidentialProbeModule,
+        num_classes=model_params["classes"],
+        lr=model_params["lr"],
+        annealing_start=model_params["annealing_start"],
+        hidden_dim=model_params["model_hidden_dim"],
+        dropout=model_params["dropout_p"],
+        input_dim=probe_input_dim,
+    )
+    LateFusionFactory = partial(
+        baselines.LateFusion,
+        model_params["classifiers"],
+        model_params["output_dims"],
+        model_params["classes"],
+        dropout=model_params["dropout_p"],
+        lr=model_params["lr"],
+        annealing_start=model_params["annealing_start"],
+        hidden_dim=model_params["model_hidden_dim"],
+    )
+    return DMVAEFactory, ProbeFactory, DisProbeFactory, LateFusionFactory
 
 
 
@@ -102,21 +187,23 @@ for seed in seeds:
     rows[seed] = {}
     ###  Normal Loop
     rows[seed]['Normal'] =  {}
-    for dataset_name in ['CUB']:#, 'CalTech', 'HandWritten', 'PIE', 'Scene']:
+    for dataset_name in normal_datasets:
         rows[seed]['Normal'][dataset_name] = {}
-        train_loader, test_loader, num_classes, num_views, dims = get_normal_data(dataset_name, batch_size)
+        train_loader, test_loader, num_classes, num_views, dims = get_normal_data(dataset_name)
         model_parameters["classes"] = num_classes
         model_parameters["output_dims"] = dims
         model_parameters['classifiers'] = [(IdentityEncoder, {}) for i in range(len(dims))]
         model_parameters['lr']  = dataset_lr[dataset_name]
 
-        dmvae_model = DMVAE(feature_encoders=model_parameters['classifiers'], output_dim=model_parameters['output_dims'], dropout=0, a=1e-5, hidden_dim=512,  
-                        embed_dim=200, lr=1e-4, num_epochs=100)
-        
+        DMVAEFactory, ProbeFactory, DisProbeFactory, LateFusionFactory = build_factories(
+            model_parameters, probe_input_dim, dmvae_kwargs
+        )
+
+        dmvae_model = DMVAEFactory()
 
         trainer = pl.Trainer(
             accelerator="auto",
-            max_epochs=100,
+            max_epochs=dmvae_kwargs["num_epochs"],
             enable_progress_bar=True,
             log_every_n_steps=20,
         )
@@ -125,20 +212,14 @@ for seed in seeds:
         path = f'checkpoints/{model_name}.ckpt'
         trainer.save_checkpoint(path)
 
-        dis_dmvae_model = DisentangledEvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
-                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'],  input_dim=200)
-        cml_dmvae_model = EvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
-                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'], aggregation='cml', input_dim=200)
-        joint_dmvae_model =  EvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
-                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'], aggregation='joint', input_dim=200)
+        dis_dmvae_model  = DisProbeFactory(dmvae_model)
+        cml_dmvae_model  = ProbeFactory(dmvae_model, aggregation="cml")
+        joint_dmvae_model = ProbeFactory(dmvae_model, aggregation="joint")
         
-        dbf_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
-                            aggregation='dbf', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
-        cml_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
-                            aggregation='cml', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
-        avg_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
-                            aggregation='avg', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
-        
+        dbf_fusion = LateFusionFactory(aggregation="dbf")
+        cml_fusion = LateFusionFactory(aggregation="cml")
+        avg_fusion = LateFusionFactory(aggregation="avg")
+
         models = [dis_dmvae_model, cml_dmvae_model, joint_dmvae_model, dbf_fusion, cml_fusion, avg_fusion]
         model_names = ['dmvae_dis','dmvae_cml','dmvae_joint','dbf_fusion','cml_fusion','avg_fusion']
         
@@ -194,8 +275,11 @@ for seed in seeds:
         model_parameters['classifiers'] = [(IdentityEncoder, {}) for _ in range(len(dims))]
         model_parameters['lr']  = dataset_lr[dataset_name]
 
-        dmvae_model = DMVAE(feature_encoders=model_parameters['classifiers'], output_dim=model_parameters['output_dims'], dropout=0, a=1e-5, hidden_dim=512,  
-                        embed_dim=200, lr=1e-4, num_epochs=100)
+        DMVAEFactory, ProbeFactory, DisProbeFactory, LateFusionFactory = build_factories(
+            model_parameters, probe_input_dim, dmvae_kwargs
+        )
+
+        dmvae_model = DMVAEFactory()
         
 
         trainer = pl.Trainer(
@@ -209,19 +293,13 @@ for seed in seeds:
         path = f'checkpoints/{model_name}.ckpt'
         trainer.save_checkpoint(path)
 
-        dis_dmvae_model = DisentangledEvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
-                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'],  input_dim=200)
-        cml_dmvae_model = EvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
-                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'], aggregation='cml', input_dim=200)
-        joint_dmvae_model =  EvidentialProbeModule(dmvae_model, num_classes=model_parameters['classes'], lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], 
-                            hidden_dim=model_parameters['model_hidden_dim'],  dropout=model_parameters['dropout_p'], aggregation='joint', input_dim=200)
+        dis_dmvae_model  = DisProbeFactory(dmvae_model)
+        cml_dmvae_model  = ProbeFactory(dmvae_model, aggregation="cml")
+        joint_dmvae_model = ProbeFactory(dmvae_model, aggregation="joint")
         
-        dbf_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
-                            aggregation='dbf', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
-        cml_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
-                            aggregation='cml', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
-        avg_fusion = baselines.LateFusion(model_parameters["classifiers"], model_parameters["output_dims"], model_parameters["classes"], dropout=model_parameters["dropout_p"], 
-                            aggregation='avg', lr=model_parameters['lr'], annealing_start=model_parameters['annealing_start'], hidden_dim=model_parameters['model_hidden_dim'])
+        dbf_fusion = LateFusionFactory(aggregation="dbf")
+        cml_fusion = LateFusionFactory(aggregation="cml")
+        avg_fusion = LateFusionFactory(aggregation="avg")
         
         models = [dis_dmvae_model, cml_dmvae_model, joint_dmvae_model, dbf_fusion, cml_fusion, avg_fusion]
         model_names = ['dmvae_dis','dmvae_cml','dmvae_joint','dbf_fusion','cml_fusion','avg_fusion']

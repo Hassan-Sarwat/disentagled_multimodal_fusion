@@ -1,0 +1,62 @@
+experiment:
+  seeds: [0, 1, 2, 3, 4]
+  normal_datasets: ["CUB", "CalTech", "HandWritten", "PIE", "Scene"]         
+  conflict_datasets: ["CUB", "CalTech", "HandWritten", "PIE", "Scene"]
+
+dataloader:
+  batch_size: 100
+  num_workers: 0
+
+data:
+  split:
+    train_frac: 0.8
+  conflict:
+    addNoise: false
+    sigma: 0.5
+    ratio_noise: 0.0
+    addConflict: true
+    ratio_conflict: 1.0
+
+optim:
+  dataset_lr:
+    CalTech: 0.0003
+    Scene: 0.01
+    CUB: 0.003
+    HandWritten: 0.003
+    PIE: 0.003
+
+dmvae:
+  dropout: 0
+  a: 1.0e-5
+  hidden_dim: 512
+  embed_dim: 200
+  lr: 0.0001
+  num_epochs: 100
+
+probes:
+  dropout_p: 0.1
+  annealing_start: 50
+  model_epochs: 200
+  model_hidden_dim: [128]
+  input_dim: 200
+
+trainer:
+  dmvae:
+    accelerator: auto
+    devices: 1
+    enable_progress_bar: true
+    log_every_n_steps: 20
+  fusion:
+    accelerator: auto
+    devices: null           # ignored; devices set from CUDA availability
+    enable_progress_bar: true
+    enable_model_summary: false
+    log_every_n_steps: 20
+
+wandb:
+  enabled: true
+  project: MDU
+  entity: hassan-sarwat-technical-university-of-munich
+
+logging:
+  datasets_excel_path: logs/dataset_analysis.xlsx
