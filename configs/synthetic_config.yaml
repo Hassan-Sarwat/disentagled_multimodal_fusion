@@ -1,0 +1,73 @@
+experiment:
+  seeds: [0, 1, 2, 3, 4, 5]
+  deps: [0, 25, 50, 75, 100]
+
+data:
+  common_med:
+    n_samples: 10000
+    d_signal: 16
+    d_spurious: 16
+    alpha_shared: 0.7
+    beta_specific: 0.6
+    class_sep_shared: 1.1
+    class_sep_private: 0.9
+    noise_std: 0.7
+    hetero_noise: true
+    hetero_scale: 0.4
+    nonlinear_shared: true
+    nonlinear_specific: false
+    conflict_frac: 0.4
+    conflict_strength: 0.7
+
+dmvae:
+  a: 1.0e-5
+  hidden_dim: 512
+  embed_dim: 16
+  lr: 0.001
+  output_dim: [32, 32]
+  num_epochs: 100
+
+dmvae_fusion:
+  annealing_start: 10
+  lr: 0.0003
+  num_classes: 3
+  num_epochs: 50
+  dropout: 0.1
+  aggregation: cml
+  input_dim: 16
+  hidden_dim: [128]
+
+latefusion:
+  annealing_start: 10
+  dropout: 0.1
+  output_dims: [32, 32]
+  num_classes: 3
+  hidden_dim: [128]
+  lr: 0.0003
+  # Optional: override encoders
+  # classifiers:
+  #   - {name: IdentityEncoder, kwargs: {}}
+  #   - {name: IdentityEncoder, kwargs: {}}
+
+trainer:
+  dmvae:
+    accelerator: auto
+    devices: 1
+    log_every_n_steps: 20
+    enable_progress_bar: false
+    enable_model_summary: false
+  dmvae_fusion:
+    accelerator: auto
+    devices: 1
+    log_every_n_steps: 20
+    enable_progress_bar: true
+    enable_model_summary: false
+  latefusion:
+    accelerator: auto
+    devices: 1
+    log_every_n_steps: 20
+    enable_progress_bar: true
+    enable_model_summary: false
+
+logging:
+  excel_path: logs/synthetic_dataset.xlsx

@@ -6,22 +6,38 @@ import models.baselines as baselines
 from models.evidential_probe import EvidentialProbeModule
 from dataset import make_loaders_simple_plus
 from classifiers import IdentityEncoder
+import yaml
+from pathlib import Path
+
+CFG_PATH = Path("configs/synthetic_config.yaml")
+with open(CFG_PATH, "r") as f:
+    cfg = yaml.safe_load(f)
+
+# Helpers with sensible fallbacks (preserve original behavior if a key is missing)
+def C(path, default=None):
+    """Dot-path getter with default, e.g., C('data.common_med.alpha_shared', 0.7)"""
+    cur = cfg
+    for p in path.split("."):
+        if not isinstance(cur, dict) or p not in cur:
+            return default
+        cur = cur[p]
+    return cur
 
 COMMON_MED = dict(
-    n_samples=10000,
-    d_signal=16,
-    d_spurious=16,          # ↓ distractors
-    alpha_shared=0.7,
-    beta_specific=0.6,
-    class_sep_shared=1.1,   # ↑ separation a bit
-    class_sep_private=0.9,  # ↑ private separation a bit
-    noise_std=0.7,          # ↓ noise
-    hetero_noise=True,
-    hetero_scale=0.4,       # ↓ heteroscedasticity
-    nonlinear_shared=True,
-    nonlinear_specific=False, # turn off private nonlinearity
-    conflict_frac=0.4,      # fewer conflict classes
-    conflict_strength=0.7,  # softer conflict
+    n_samples=C("data.common_med.n_samples", 10000),
+    d_signal=C("data.common_med.d_signal", 16),
+    d_spurious=C("data.common_med.d_spurious", 16),
+    alpha_shared=C("data.common_med.alpha_shared", 0.7),
+    beta_specific=C("data.common_med.beta_specific", 0.6),
+    class_sep_shared=C("data.common_med.class_sep_shared", 1.1),
+    class_sep_private=C("data.common_med.class_sep_private", 0.9),
+    noise_std=C("data.common_med.noise_std", 0.7),
+    hetero_noise=C("data.common_med.hetero_noise", True),
+    hetero_scale=C("data.common_med.hetero_scale", 0.4),
+    nonlinear_shared=C("data.common_med.nonlinear_shared", True),
+    nonlinear_specific=C("data.common_med.nonlinear_specific", False),
+    conflict_frac=C("data.common_med.conflict_frac", 0.4),
+    conflict_strength=C("data.common_med.conflict_strength", 0.7),
 )
 
 def make_dep_loader_med(dep_percent, seed=7, **overrides):
@@ -34,15 +50,12 @@ def make_dep_loader_med(dep_percent, seed=7, **overrides):
     )
 
 
-def train_dmvae(train_loader, seed, dep, a=1e-5,hidden_dim=512, embed_dim=16,lr=1e-3, output_dim=[32,32], num_epochs=100):
-    dmvae = DMVAE(
-    output_dim=output_dim,     # match X1/X2 dims
-    hidden_dim=hidden_dim,          # 256 if inputs ~100-D
-    embed_dim=embed_dim,             # match ds=8
-    lr=lr,                 # AdamW; keep weight_decay=1e-4 in optimizer
-    a=a,                   # with KL warm-up 0→1 over first 30% epochs
-    num_epochs=num_epochs
-    )
+def train_dmvae(train_loader, seed, dep, a=C("dmvae.a", 1e-5),hidden_dim=C("dmvae.hidden_dim", 512), 
+                embed_dim=C("dmvae.embed_dim", 16),lr=C("dmvae.lr", 1e-3), output_dim=C("dmvae.output_dim", [32, 32]), 
+                num_epochs=C("dmvae.num_epochs", 100)):
+    
+    dmvae = DMVAE(output_dim=output_dim, hidden_dim=hidden_dim, embed_dim=embed_dim, 
+                  lr=lr, a=a, num_epochs=num_epochs)
 
     trainer = pl.Trainer(
         accelerator="auto",
@@ -54,12 +67,14 @@ def train_dmvae(train_loader, seed, dep, a=1e-5,hidden_dim=512, embed_dim=16,lr=
     )
 
     trainer.fit(dmvae, train_dataloaders=train_loader)
-    dmvae_name = f'checkpoints/dmvae_seed{seed}_dep{dep}_a{1e-5}_hd{hidden_dim}_lr{lr}_ed{embed_dim}.ckpt'
+    dmvae_name = f'checkpoints/dmvae_seed{seed}_dep{dep}_a{a}_hd{hidden_dim}_lr{lr}_ed{embed_dim}.ckpt'
     trainer.save_checkpoint(dmvae_name)
     return dmvae
 
-def train_dmvae_fusion(dmvae, train_loader, test_loader, seed, dep, annealing_start=10, lr=3e-4,num_classes=3,
-                        num_epochs=50,dropout=0.1, aggregation='cml',input_dim=16, hidden_dim=(128,)):
+def train_dmvae_fusion(dmvae, train_loader, test_loader, seed, dep, annealing_start=C("dmvae_fusion.annealing_start", 10), 
+                       lr=C("dmvae_fusion.lr", 3e-4),num_classes=C("dmvae_fusion.num_classes", 3), num_epochs=C("dmvae_fusion.num_epochs", 50),
+                       dropout=C("dmvae_fusion.dropout", 0.1), aggregation=C("dmvae_fusion.aggregation", "cml"),input_dim=C("dmvae_fusion.input_dim", 16), 
+                       hidden_dim=tuple(C("dmvae_fusion.hidden_dim", (128,)))):
     
     model_name = f'checkpoints/dmvae_fusion_seed{seed}_dep{dep}_agg{aggregation}_hd{hidden_dim}_lr{lr}.ckpt'
     dmvae_fusion = EvidentialProbeModule(backbone=dmvae,num_classes=num_classes, input_dim=input_dim, aggregation=aggregation, dropout=dropout,
@@ -79,8 +94,28 @@ def train_dmvae_fusion(dmvae, train_loader, test_loader, seed, dep, annealing_st
     trainer.save_checkpoint(model_name)
     return dmvae_fusion
 
-def train_latefusion(train_loader, test_loader, seed, dep, aggregation, annealing_start=10, dropout=0.1, output_dims=[32,32],num_classes=3,
-                     hidden_dim=(128,), lr=3e-4, classifiers = [(IdentityEncoder, {}), (IdentityEncoder, {})], num_epochs=50):
+CLASSIFIER_REGISTRY = {
+    "IdentityEncoder": IdentityEncoder,
+    # Add more here if you want to select different encoders from YAML later
+}
+
+def _build_classifiers_from_cfg():
+    cls_cfg_list = C("latefusion.classifiers", None)
+    if not cls_cfg_list:
+        # default to your original two IdentityEncoders
+        return [(IdentityEncoder, {}), (IdentityEncoder, {})]
+    out = []
+    for item in cls_cfg_list:
+        name = item.get("name")
+        kwargs = item.get("kwargs", {}) or {}
+        if name not in CLASSIFIER_REGISTRY:
+            raise ValueError(f"Unknown classifier name in config: {name}")
+        out.append((CLASSIFIER_REGISTRY[name], kwargs))
+    return out
+
+def train_latefusion(train_loader, test_loader, seed, dep, aggregation, annealing_start=C("latefusion.annealing_start", 10), dropout=C("latefusion.dropout", 0.1), 
+                     output_dims=C("latefusion.output_dims", [32, 32]),num_classes=C("latefusion.num_classes", 3), hidden_dim=tuple(C("latefusion.hidden_dim", (128,))), 
+                     lr=C("latefusion.lr", 3e-4), classifiers = _build_classifiers_from_cfg(), num_epochs=C("latefusion.num_epochs", 50)):
     
     fusion = baselines.LateFusion(classifiers, output_dims, num_classes = num_classes, dropout=dropout, 
                             aggregation=aggregation, annealing_start = annealing_start, lr=lr, hidden_dim=hidden_dim, fused=0)
@@ -101,23 +136,77 @@ def train_latefusion(train_loader, test_loader, seed, dep, aggregation, annealin
 
 
 
+seeds = C("experiment.seeds", [0, 1, 2, 3, 4, 5])
+deps = C("experiment.deps", [0, 25, 50, 75, 100])
 
 rows = {}
-for seed in [0,1,2,3,4,5]:
+for seed in seeds:
     rows[seed] = {}
-    for dep in [0,25,50,75,100]:
+    for dep in deps:
         pl.seed_everything(seed)
         rows[seed][dep] = {}
         ds, train_loader, test_loader = make_dep_loader_med(dep, seed=seed)
-        dmvae = train_dmvae(train_loader, seed, dep, a=1e-5,)
+        dmvae = train_dmvae(
+            train_loader=train_loader,
+            seed=seed,
+            dep=dep,
+            a=C("dmvae.a", 1e-5),
+            hidden_dim=C("dmvae.hidden_dim", 512),
+            embed_dim=C("dmvae.embed_dim", 16),
+            lr=C("dmvae.lr", 1e-3),
+            output_dim=C("dmvae.output_dim", [32, 32]),
+            num_epochs=C("dmvae.num_epochs", 100),
+        )
 
-        dmvae_fusion = train_dmvae_fusion(dmvae,train_loader, test_loader, seed, dep)
+        dmvae_fusion = train_dmvae_fusion(
+            dmvae=dmvae,
+            train_loader=train_loader,
+            test_loader=test_loader,
+            seed=seed,
+            dep=dep,
+            annealing_start=C("dmvae_fusion.annealing_start", 10),
+            lr=C("dmvae_fusion.lr", 3e-4),
+            num_classes=C("dmvae_fusion.num_classes", 3),
+            num_epochs=C("dmvae_fusion.num_epochs", 50),
+            dropout=C("dmvae_fusion.dropout", 0.1),
+            aggregation=C("dmvae_fusion.aggregation", "cml"),
+            input_dim=C("dmvae_fusion.input_dim", 16),
+            hidden_dim=tuple(C("dmvae_fusion.hidden_dim", (128,))),
+        )
         rows[seed][dep]['dmvae_cml'] = evaluate_subjective_model_with_shared(dmvae_fusion, test_loader)
         
-        cml_fusion = train_latefusion(train_loader, test_loader, seed, dep, aggregation='cml')
-        rows[seed][dep]['cml'] = evaluate_subjective_model(cml_fusion, test_loader)
+        cml_fusion = train_latefusion(
+            train_loader=train_loader,
+            test_loader=test_loader,
+            seed=seed,
+            dep=dep,
+            aggregation="cml",  # keep explicit; filename uses this
+            annealing_start=C("latefusion.annealing_start", 10),
+            dropout=C("latefusion.dropout", 0.1),
+            output_dims=C("latefusion.output_dims", [32, 32]),
+            num_classes=C("latefusion.num_classes", 3),
+            hidden_dim=tuple(C("latefusion.hidden_dim", (128,))),
+            lr=C("latefusion.lr", 3e-4),
+            classifiers=None,  # will use YAML if provided
+            num_epochs=C("latefusion.num_epochs", 50),
+        )
+        rows[seed][dep]["cml"] = evaluate_subjective_model(cml_fusion, test_loader)
 
-        avg_fusion = train_latefusion(train_loader, test_loader, seed, dep, aggregation='avg')
+        avg_fusion = train_latefusion(
+            train_loader=train_loader,
+            test_loader=test_loader,
+            seed=seed,
+            dep=dep,
+            aggregation="avg",  # keep explicit; filename uses this
+            annealing_start=C("latefusion.annealing_start", 10),
+            dropout=C("latefusion.dropout", 0.1),
+            output_dims=C("latefusion.output_dims", [32, 32]),
+            num_classes=C("latefusion.num_classes", 3),
+            hidden_dim=tuple(C("latefusion.hidden_dim", (128,))),
+            lr=C("latefusion.lr", 3e-4),
+            classifiers=None,  # will use YAML if provided
+            num_epochs=C("latefusion.num_epochs", 50),
+        )
         rows[seed][dep]['avg'] = evaluate_subjective_model(avg_fusion, test_loader)
 
 
