@@ -6,14 +6,13 @@ from collections import OrderedDict
 from pprint import pprint
 from pathlib import Path
 import yaml
-import wandb
 from dotenv import load_dotenv
 
 import torch
 from torch.utils.data import DataLoader, Subset, random_split
 
 import pytorch_lightning as pl
-from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.loggers import CSVLogger
 import json
 import models.baselines as baselines
 from dataset import CUB, Caltech, HandWritten, PIE, Scene
@@ -22,10 +21,6 @@ from analysis import evaluate_subjective_model, evaluate_subjective_model_with_s
 from  models.dmvae import DMVAE
 from models.evidential_probe  import EvidentialProbeModule, DisentangledEvidentialProbeModule
 from functools import partial
-
-load_dotenv()
-api_key = os.getenv('WAND_API_KEY')
-wandb.login(key=api_key)
 
 CFG_PATH = Path("configs/config.yaml")
 with open(CFG_PATH, "r") as f:
@@ -229,13 +224,9 @@ for seed in seeds:
             print(f'Training model {model_name}')
             tags=[name,str(seed), dataset_name,'Normal']
             model_parameters.update({"dataset": dataset_name, "seed": seed,'aggregation':name ,'UQ':'Normal'})
-            wandb_logger = WandbLogger(
-                project="MDU",
-                entity="hassan-sarwat-technical-university-of-munich",
+            csv_logger = CSVLogger(
+                save_dir="logs/",
                 name=model_name,
-                tags=tags,
-                log_model=True,
-                config=model_parameters,
             )
 
             gpus = 1 if torch.cuda.is_available() else 0
@@ -246,7 +237,7 @@ for seed in seeds:
                 log_every_n_steps=20, # For speed
                 enable_progress_bar=True,
                 enable_model_summary=False,
-                logger=wandb_logger        # turn off TensorBoard for brevity
+                logger=csv_logger        # turn off TensorBoard for brevity
             )
 
             # Lightning will call model.training_step & model.validation_step
@@ -263,8 +254,6 @@ for seed in seeds:
             else:    
                 rows[seed]['Normal'][dataset_name][name] = evaluate_subjective_model_with_shared(model, test_loader)
             rows[seed]['Normal'][dataset_name][name].update({'path':path})
-            # wandb_logger.log_metrics(test_metrics, step=trainer.global_step)
-            wandb_logger.experiment.finish()
 
     rows[seed]['Conflict'] = {}
     for dataset_name in ['CUB']:#, 'CalTech', 'HandWritten', 'PIE', 'Scene']:
@@ -309,13 +298,9 @@ for seed in seeds:
             print(f'Training model {model_name}')
             tags=[name,str(seed),dataset_name,'Conflict']
             model_parameters.update({"dataset": dataset_name, "seed": seed,'aggregation':name, 'UQ':'Conflict'})
-            wandb_logger = WandbLogger(
-                project="MDU",
-                entity="hassan-sarwat-technical-university-of-munich",
+            csv_logger = CSVLogger(
+                save_dir="logs/",
                 name=model_name,
-                tags=tags,
-                log_model=True,
-                config=model_parameters,
             )
             gpus = 1 if torch.cuda.is_available() else 0
             trainer = pl.Trainer(
@@ -325,7 +310,7 @@ for seed in seeds:
                 log_every_n_steps=20, # For speed
                 enable_progress_bar=True,
                 enable_model_summary=False,
-                logger=wandb_logger        # turn off TensorBoard for brevity
+                logger=csv_logger        # turn off TensorBoard for brevity
             )
 
             trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=test_loader)
@@ -339,8 +324,6 @@ for seed in seeds:
             else:    
                 rows[seed]['Conflict'][dataset_name][name] = evaluate_subjective_model_with_shared(model, test_loader)
             rows[seed]['Conflict'][dataset_name][name].update({'path':path})
-            # wandb_logger.log_metrics(test_metrics, step=trainer.global_step)
-            wandb_logger.experiment.finish()
 
 
 df = build_metrics_dataframe_datasets(rows)
