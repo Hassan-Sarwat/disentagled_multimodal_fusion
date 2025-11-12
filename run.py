@@ -258,7 +258,7 @@ for seed in seeds:
     rows[seed]['Conflict'] = {}
     for dataset_name in ['CUB']:#, 'CalTech', 'HandWritten', 'PIE', 'Scene']:
         rows[seed]['Conflict'][dataset_name] = {}
-        train_loader, test_loader, num_classes, num_views, dims = get_conflict_data(dataset_name, batch_size)
+        train_loader, test_loader, num_classes, num_views, dims = get_conflict_data(dataset_name)
         model_parameters["classes"] = num_classes
         model_parameters["output_dims"] = dims
         model_parameters['classifiers'] = [(IdentityEncoder, {}) for _ in range(len(dims))]
