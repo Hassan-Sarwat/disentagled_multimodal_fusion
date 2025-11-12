@@ -7,3 +7,4 @@ wandb
 checkpoints
 *.env
 *.ckpt
+external
