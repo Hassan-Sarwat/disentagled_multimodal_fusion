@@ -343,7 +343,7 @@ class LUMADataset(Dataset):
         or EDM generated images based on the class label.
         
         Returns:
-            Tensor of shape (3, H, W)
+            Tensor of shape (H*W*C,) - flattened image
         """
         # TODO: Implement proper image loading from CIFAR/EDM
         # For now, create a random image placeholder
@@ -357,7 +357,12 @@ class LUMADataset(Dataset):
         # Placeholder: Create a random image
         # In practice, load actual CIFAR images
         img = Image.new('RGB', self.image_config['size'], color=(128, 128, 128))
-        return self.image_transform(img)
+        img_tensor = self.image_transform(img)  # Shape: (3, H, W)
+        
+        # Flatten to (C*H*W,) for the model
+        img_flat = img_tensor.flatten()
+        
+        return img_flat
     
     def __len__(self) -> int:
         return len(self.samples)
@@ -395,6 +400,35 @@ class LUMADataset(Dataset):
         text_dim = self.text_config['max_length']
         image_dim = self.image_config['size'][0] * self.image_config['size'][1] * 3
         return [audio_dim, text_dim, image_dim]
+
+
+def luma_collate_fn(batch):
+    """
+    Custom collate function to format batch for DMVAE.
+    
+    Input: list of tuples [(views, label), ...]
+           where views = [audio_tensor, text_tensor, image_tensor]
+    Output: flat list [x0_batch, x1_batch, x2_batch, labels_batch]
+    """
+    views_list = [item[0] for item in batch]  # list of [audio, text, image]
+    labels = [item[1] for item in batch]
+    
+    # Stack each modality separately
+    num_modalities = len(views_list[0])
+    modality_batches = []
+    
+    for i in range(num_modalities):
+        modality_data = torch.stack([views[i] for views in views_list])
+        # Ensure float32 for all modalities (text will be converted from int64)
+        if i == 1:  # Text modality - keep as int64 for now, will convert in model if needed
+            modality_batches.append(modality_data.long())
+        else:
+            modality_batches.append(modality_data.float())
+    
+    labels_batch = torch.tensor(labels, dtype=torch.long)
+    
+    # Return as flat list: [x0, x1, x2, labels]
+    return modality_batches + [labels_batch]
 
 
 def get_luma_dataloaders(
@@ -453,6 +487,7 @@ def get_luma_dataloaders(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
+        collate_fn=luma_collate_fn,  # Use custom collate function
     )
     
     test_loader = DataLoader(
@@ -461,6 +496,7 @@ def get_luma_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        collate_fn=luma_collate_fn,  # Use custom collate function
     )
     
     num_classes = train_dataset.num_classes

@@ -3,8 +3,14 @@ Main script for running experiments on the LUMA dataset.
 
 This script trains and evaluates multiple fusion methods on the LUMA multimodal dataset:
 1. DMVAE (Disentanglement-based Multimodal VAE)
-2. DMVAE + Evidential Fusion (DCBF, DJOINT, PBF)
-3. Late Fusion baselines (ABF, CBF, DBF)
+2. Disentangled fusion methods:
+   - DCBF (Disentangled Cumulative Belief Fusion)
+   - DJOINT (Disentangled Joint)
+   - PBF (Private Belief Fusion - ablation)
+3. Late Fusion baselines (without disentanglement):
+   - avg (Average Belief Fusion)
+   - CBF (Cumulative Belief Fusion)
+   - DBF (Discounted Belief Fusion)
 
 Usage:
     python run_luma.py
@@ -20,15 +26,23 @@ from collections import OrderedDict
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import CSVLogger
+
+# Import models
 import models.baselines as baselines
 from models.dmvae import DMVAE
 from models.evidential_probe import EvidentialProbeModule, DisentangledEvidentialProbeModule
+
+# Import dataset
 from dataset_luma import get_luma_dataloaders
+
+# Import analysis utilities
 from analysis import evaluate_subjective_model, evaluate_subjective_model_with_shared, build_metrics_dataframe_datasets
+
+# Import classifiers
 from classifiers import IdentityEncoder
 
 # Load configuration
-CFG_PATH = Path("configs/luma_compile_config.yaml")
+CFG_PATH = Path("configs/luma_config.yaml")
 with open(CFG_PATH, "r") as f:
     cfg = yaml.safe_load(f)
 
@@ -82,25 +96,28 @@ def get_luma_data():
     return train_loader, test_loader, num_classes, num_views, dims
 
 
-def train_dmvae(train_loader, seed, output_dims):
+def train_dmvae(train_loader, seed, num_classes, output_dims):
     """Train DMVAE for disentanglement."""
-    dmvae_kwargs = {
-        "feature_encoders": None,  # Will use default encoders
-        "output_dim": output_dims,
-        "dropout": C("dmvae.dropout", 0),
-        "a": C("dmvae.a", 1e-5),
-        "hidden_dim": C("dmvae.hidden_dim", 512),
-        "embed_dim": C("dmvae.embed_dim", 200),
-        "lr": C("dmvae.lr", 1e-4),
-        "num_epochs": C("dmvae.num_epochs", 100),
-    }
+    print(f"  Training DMVAE...")
     
-    dmvae = DMVAE(**dmvae_kwargs)
+    # Create feature encoders (IdentityEncoder for each modality)
+    feature_encoders = [(IdentityEncoder, {}) for _ in range(len(output_dims))]
+    
+    dmvae = DMVAE(
+        feature_encoders=feature_encoders,
+        output_dim=output_dims,
+        dropout=C("dmvae.dropout", 0),
+        a=C("dmvae.a", 1e-5),
+        hidden_dim=C("dmvae.hidden_dim", 512),
+        embed_dim=C("dmvae.embed_dim", 200),
+        lr=C("dmvae.lr", 1e-4),
+        num_epochs=C("dmvae.num_epochs", 100),
+    )
     
     trainer = pl.Trainer(
         accelerator=C("trainer.dmvae.accelerator", "auto"),
         devices=C("trainer.dmvae.devices", 1),
-        max_epochs=dmvae_kwargs["num_epochs"],
+        max_epochs=C("dmvae.num_epochs", 100),
         log_every_n_steps=C("trainer.dmvae.log_every_n_steps", 20),
         enable_progress_bar=C("trainer.dmvae.enable_progress_bar", True),
         enable_model_summary=False,
@@ -117,40 +134,53 @@ def train_dmvae(train_loader, seed, output_dims):
     return dmvae
 
 
-def train_dmvae_fusion(dmvae, train_loader, test_loader, seed, aggregation="cml", fused=0):
-    """Train evidential probe on DMVAE embeddings."""
-    num_classes = C("dmvae_fusion.num_classes", 42)
+def train_disentangled_fusion(dmvae, train_loader, test_loader, seed, num_classes, aggregation="dcbf"):
+    """
+    Train disentangled evidential fusion methods.
     
-    if aggregation in ["dcbf", "djoint", "pbf"]:
-        # Disentangled fusion
+    Uses:
+    - DisentangledEvidentialProbeModule for PBF (private only)
+    - EvidentialProbeModule for DCBF and DJOINT
+    """
+    print(f"  Training {aggregation.upper()}...")
+    
+    # Map aggregation names
+    agg_map = {
+        'dcbf': 'cml',    # Disentangled Cumulative Belief Fusion
+        'djoint': 'cml', # Disentangled Joint
+        'pbf': 'cml',     # Private Belief Fusion (ablation)
+    }
+    
+    agg_name = agg_map.get(aggregation, aggregation)
+    
+    # Use DisentangledEvidentialProbeModule for PBF (private only)
+    if aggregation == 'pbf':
         model = DisentangledEvidentialProbeModule(
             backbone=dmvae,
             num_classes=num_classes,
-            input_dim=C("dmvae_fusion.input_dim", 200),
-            aggregation=aggregation,
-            dropout=C("dmvae_fusion.dropout", 0.1),
-            annealing_start=C("dmvae_fusion.annealing_start", 10),
-            lr=C("dmvae_fusion.lr", 3e-4),
-            hidden_dim=tuple(C("dmvae_fusion.hidden_dim", [128])),
+            input_dim=C("probes.input_dim", 200),
+            dropout=C("probes.dropout_p", 0.1),
+            annealing_start=C("probes.annealing_start", 50),
+            lr=C("probes.lr", 3e-4),
+            hidden_dim=tuple(C("probes.model_hidden_dim", [128])),
             freeze_backbone=True,
-            fused=fused,
         )
     else:
-        # Standard fusion
+        # Use EvidentialProbeModule for DCBF and DJOINT
         model = EvidentialProbeModule(
             backbone=dmvae,
             num_classes=num_classes,
-            input_dim=C("dmvae_fusion.input_dim", 200),
-            aggregation=aggregation,
-            dropout=C("dmvae_fusion.dropout", 0.1),
-            annealing_start=C("dmvae_fusion.annealing_start", 10),
-            lr=C("dmvae_fusion.lr", 3e-4),
-            hidden_dim=tuple(C("dmvae_fusion.hidden_dim", [128])),
+            input_dim=C("probes.input_dim", 200),
+            aggregation=agg_name,
+            dropout=C("probes.dropout_p", 0.1),
+            annealing_start=C("probes.annealing_start", 50),
+            lr=C("probes.lr", 3e-4),
+            hidden_dim=tuple(C("probes.model_hidden_dim", [128])),
             freeze_backbone=True,
-            fused=fused,
+            fused=1,  # Include shared modality
         )
     
-    num_epochs = C("dmvae_fusion.num_epochs", 50)
+    num_epochs = C("probes.model_epochs", 200)
     
     trainer = pl.Trainer(
         accelerator=C("trainer.fusion.accelerator", "auto"),
@@ -165,23 +195,23 @@ def train_dmvae_fusion(dmvae, train_loader, test_loader, seed, aggregation="cml"
     
     # Save checkpoint
     checkpoint_dir = Path(C("logging.checkpoint_dir", "checkpoints"))
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = checkpoint_dir / f'dmvae_fusion_luma_seed{seed}_agg{aggregation}.ckpt'
+    checkpoint_path = checkpoint_dir / f'{aggregation}_luma_seed{seed}.ckpt'
     trainer.save_checkpoint(checkpoint_path)
     
     return model
 
 
-def train_latefusion(train_loader, test_loader, seed, output_dims, aggregation="avg"):
-    """Train late fusion baseline."""
-    num_classes = C("latefusion.num_classes", 42)
+def train_late_fusion(train_loader, test_loader, seed, num_classes, output_dims, aggregation="avg"):
+    """
+    Train late fusion baselines (without disentanglement).
     
-    # Create classifiers for each modality
-    classifiers = [
-        (IdentityEncoder, {}),
-        (IdentityEncoder, {}),
-        (IdentityEncoder, {}),
-    ]
+    Uses LateFusion from baselines module.
+    """
+    print(f"  Training {aggregation.upper()} (late fusion)...")
+    
+    
+    # Create classifiers for each modality (IdentityEncoder)
+    classifiers = [(IdentityEncoder, {}) for _ in range(len(output_dims))]
     
     model = baselines.LateFusion(
         classifiers,
@@ -210,8 +240,7 @@ def train_latefusion(train_loader, test_loader, seed, output_dims, aggregation="
     
     # Save checkpoint
     checkpoint_dir = Path(C("logging.checkpoint_dir", "checkpoints"))
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = checkpoint_dir / f'latefusion_luma_seed{seed}_agg{aggregation}.ckpt'
+    checkpoint_path = checkpoint_dir / f'{aggregation}_luma_seed{seed}.ckpt'
     trainer.save_checkpoint(checkpoint_path)
     
     return model
@@ -224,11 +253,13 @@ def main():
     print("="*70)
     
     # Get configuration
-    seeds = C("experiment.seeds", [0, 1, 2, 3, 4])
+    seeds = C("experiment.seeds", [0])
     
     # Create output directory
     output_dir = Path(C("logging.output_dir", "logs"))
     output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = Path(C("logging.checkpoint_dir", "checkpoints"))
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
     # Load data
     print("\nLoading LUMA dataset...")
@@ -237,78 +268,223 @@ def main():
     print(f"  Modalities: {num_views}")
     print(f"  Dimensions: {dims}")
     
+    # Model parameters
+    model_parameters = {
+        "classes": num_classes,
+        "output_dims": dims,
+        "classifiers": [(IdentityEncoder, {}) for _ in range(len(dims))],
+        "lr": C("probes.lr", 3e-4),
+        "dropout_p": C("probes.dropout_p", 0.1),
+        "annealing_start": C("probes.annealing_start", 50),
+        "model_epochs": C("probes.model_epochs", 200),
+        "model_hidden_dim": tuple(C("probes.model_hidden_dim", [128])),
+    }
+    
+    probe_input_dim = C("probes.input_dim", 200)
+    
+    dmvae_kwargs = {
+        "dropout": C("dmvae.dropout", 0),
+        "a": C("dmvae.a", 1e-5),
+        "hidden_dim": C("dmvae.hidden_dim", 512),
+        "embed_dim": C("dmvae.embed_dim", 200),
+        "lr": C("dmvae.lr", 1e-4),
+        "num_epochs": C("dmvae.num_epochs", 2),
+    }
+    
     # Store results
-    results = {}
+    rows = {}
     
     for seed in seeds:
         print(f"\n{'='*70}")
-        print(f"Running experiments with seed {seed} out of {len(seeds)}")
+        print(f"Running experiments with seed {seed}")
         print(f"{'='*70}")
         
         pl.seed_everything(seed)
         
-        results[seed] = {}
+        rows[seed] = {}
+        rows[seed]['Normal'] = {}
+        rows[seed]['Normal']['LUMA'] = {}
         
+        # ========================================
         # Step 1: Train DMVAE for disentanglement
+        # ========================================
         print(f"\n[Seed {seed}] Training DMVAE...")
-        dmvae = train_dmvae(train_loader, seed, output_dims=dims)
         
-        # Step 2: Train DMVAE-based fusion methods
-        print(f"\n[Seed {seed}] Training DMVAE Fusion methods...")
+        dmvae_model = DMVAE(
+            feature_encoders=model_parameters["classifiers"],
+            output_dim=model_parameters["output_dims"],
+            dropout=dmvae_kwargs["dropout"],
+            a=dmvae_kwargs["a"],
+            hidden_dim=dmvae_kwargs["hidden_dim"],
+            embed_dim=dmvae_kwargs["embed_dim"],
+            lr=dmvae_kwargs["lr"],
+            num_epochs=dmvae_kwargs["num_epochs"],
+        )
         
-        # DCBF (Disentangled Cumulative Belief Fusion)
-        print(f"  - DCBF (Disentangled Cumulative Belief Fusion)")
-        dcbf_model = train_dmvae_fusion(dmvae, train_loader, test_loader, seed, aggregation="dcbf")
-        results[seed]['dcbf'] = evaluate_subjective_model_with_shared(dcbf_model, test_loader)
+        trainer = pl.Trainer(
+            accelerator="auto",
+            max_epochs=dmvae_kwargs["num_epochs"],
+            enable_progress_bar=True,
+            log_every_n_steps=20,
+            enable_model_summary=False,
+        )
+        trainer.fit(dmvae_model, train_dataloaders=train_loader)
         
-        # DJOINT (Disentangled Joint)
-        print(f"  - DJOINT (Disentangled Joint)")
-        djoint_model = train_dmvae_fusion(dmvae, train_loader, test_loader, seed, aggregation="djoint")
-        results[seed]['djoint'] = evaluate_subjective_model_with_shared(djoint_model, test_loader)
+        dmvae_checkpoint = checkpoint_dir / f'dmvae_datasetLUMA_seed{seed}_a{dmvae_kwargs["a"]}_normal.ckpt'
+        trainer.save_checkpoint(dmvae_checkpoint)
+        print(f"  Saved DMVAE checkpoint: {dmvae_checkpoint}")
         
-        # PBF (Private Belief Fusion)
-        print(f"  - PBF (Private Only)")
-        pbf_model = train_dmvae_fusion(dmvae, train_loader, test_loader, seed, aggregation="pbf")
-        results[seed]['pbf'] = evaluate_subjective_model_with_shared(pbf_model, test_loader)
+        # ========================================
+        # Step 2: Create all models
+        # ========================================
+        print(f"\n[Seed {seed}] Creating fusion models...")
         
-        # Step 3: Train Late Fusion baselines
-        print(f"\n[Seed {seed}] Training Late Fusion baselines...")
+        # Disentangled models (use DMVAE embeddings)
+        dis_dmvae_model = DisentangledEvidentialProbeModule(
+            backbone=dmvae_model,
+            num_classes=model_parameters["classes"],
+            input_dim=probe_input_dim,
+            lr=model_parameters["lr"],
+            annealing_start=model_parameters["annealing_start"],
+            hidden_dim=model_parameters["model_hidden_dim"],
+            dropout=model_parameters["dropout_p"],
+            freeze_backbone=True,
+        )
         
-        # Average Belief Fusion
-        print(f"  - ABF (Average Belief Fusion)")
-        abf_model = train_latefusion(train_loader, test_loader, seed, dims, aggregation="avg")
-        results[seed]['abf'] = evaluate_subjective_model(abf_model, test_loader)
+        cml_dmvae_model = EvidentialProbeModule(
+            backbone=dmvae_model,
+            num_classes=model_parameters["classes"],
+            input_dim=probe_input_dim,
+            aggregation="cml",
+            lr=model_parameters["lr"],
+            annealing_start=model_parameters["annealing_start"],
+            hidden_dim=model_parameters["model_hidden_dim"],
+            dropout=model_parameters["dropout_p"],
+            freeze_backbone=True,
+            fused=0,
+        )
         
-        # Cumulative Belief Fusion
-        print(f"  - CBF (Cumulative Belief Fusion)")
-        cbf_model = train_latefusion(train_loader, test_loader, seed, dims, aggregation="cml")
-        results[seed]['cbf'] = evaluate_subjective_model(cbf_model, test_loader)
+        joint_dmvae_model = EvidentialProbeModule(
+            backbone=dmvae_model,
+            num_classes=model_parameters["classes"],
+            input_dim=probe_input_dim,
+            aggregation="joint",
+            lr=model_parameters["lr"],
+            annealing_start=model_parameters["annealing_start"],
+            hidden_dim=model_parameters["model_hidden_dim"],
+            dropout=model_parameters["dropout_p"],
+            freeze_backbone=True,
+            fused=0,
+        )
         
-        # Discounted Belief Fusion
-        print(f"  - DBF (Discounted Belief Fusion)")
-        dbf_model = train_latefusion(train_loader, test_loader, seed, dims, aggregation="dsc")
-        results[seed]['dbf'] = evaluate_subjective_model(dbf_model, test_loader)
+        # Late fusion models (no disentanglement)
+        dbf_fusion = baselines.LateFusion(
+            model_parameters["classifiers"],
+            model_parameters["output_dims"],
+            model_parameters["classes"],
+            dropout=model_parameters["dropout_p"],
+            aggregation="dbf",
+            annealing_start=10,
+            lr=model_parameters["lr"],
+            hidden_dim=model_parameters["model_hidden_dim"],
+            fused=0,
+        )
         
-        print(f"\n[Seed {seed}] Completed!")
+        cml_fusion = baselines.LateFusion(
+            model_parameters["classifiers"],
+            model_parameters["output_dims"],
+            model_parameters["classes"],
+            dropout=model_parameters["dropout_p"],
+            aggregation="cml",
+            annealing_start=10,
+            lr=model_parameters["lr"],
+            hidden_dim=model_parameters["model_hidden_dim"],
+            fused=0,
+        )
+        
+        avg_fusion = baselines.LateFusion(
+            model_parameters["classifiers"],
+            model_parameters["output_dims"],
+            model_parameters["classes"],
+            dropout=model_parameters["dropout_p"],
+            aggregation="avg",
+            annealing_start=10,
+            lr=model_parameters["lr"],
+            hidden_dim=model_parameters["model_hidden_dim"],
+            fused=0,
+        )
+        
+        models = [dis_dmvae_model, cml_dmvae_model, joint_dmvae_model, dbf_fusion, cml_fusion, avg_fusion]
+        model_names = ['dmvae_dis', 'dmvae_cml', 'dmvae_joint', 'dbf_fusion', 'cml_fusion', 'avg_fusion']
+        
+        # ========================================
+        # Step 3: Train and evaluate all models
+        # ========================================
+        for model, name in zip(models, model_names):
+            model_name = f'{name}_fusion_dsLUMA_seed{seed}'
+            print(f'\nTraining model {model_name}')
+            
+            csv_logger = CSVLogger(
+                save_dir="logs/",
+                name=model_name,
+            )
+            
+            gpus = 1 if torch.cuda.is_available() else 0
+            trainer = pl.Trainer(
+                accelerator="auto" if gpus else "cpu",
+                devices=gpus if gpus else None,
+                max_epochs=model_parameters['model_epochs'],
+                log_every_n_steps=20,
+                enable_progress_bar=True,
+                enable_model_summary=False,
+                logger=csv_logger,
+            )
+            
+            # Train model
+            trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=test_loader)
+            
+            # Save checkpoint
+            checkpoint_path = checkpoint_dir / f'{model_name}.ckpt'
+            trainer.save_checkpoint(checkpoint_path)
+            
+            # Test model
+            print(f'Evaluating model {model_name}...')
+            test_metrics = trainer.test(model, dataloaders=test_loader, verbose=False)
+            print(f'Test metrics for {model_name}:')
+            from pprint import pprint
+            pprint(test_metrics)
+            
+            # Evaluate and store results
+            if name == 'dmvae_dis':
+                # Private only - no shared modality
+                rows[seed]['Normal']['LUMA'][name] = evaluate_subjective_model(model, test_loader)
+            else:
+                # Includes shared modality
+                rows[seed]['Normal']['LUMA'][name] = evaluate_subjective_model_with_shared(model, test_loader)
+            
+            rows[seed]['Normal']['LUMA'][name].update({'path': str(checkpoint_path)})
+            print(f'✓ Completed {model_name}\n')
+        
+        print(f"\n[Seed {seed}] ✓ Completed all experiments!")
     
-    # Build results dataframe
+    # ========================================
+    # Build and Save Results
+    # ========================================
     print("\n" + "="*70)
     print("Building results dataframe...")
     print("="*70)
     
-    # Organize results for DataFrame
-    nested_results = {}
-    for seed in seeds:
-        nested_results[seed] = {
-            'luma': {
-                'LUMA': results[seed]
-            }
-        }
+    # Build dataframe using the same structure as run.py
+    df = build_metrics_dataframe_datasets(rows)
     
-    df = build_metrics_dataframe_datasets(nested_results)
+    # Compute grouped statistics (mean and std across seeds)
+    print("\nComputing statistics across seeds...")
     
-    # Compute grouped statistics
-    df_grouped = df.groupby(['dataset', 'model']).agg(['mean', 'std']).reset_index()
+    grouped_cols = ['type', 'dataset', 'model']
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    numeric_cols = [c for c in numeric_cols if c not in ['seed']]
+    
+    df_grouped = df.groupby(grouped_cols)[numeric_cols].agg(['mean', 'std']).reset_index()
     
     # Save results
     excel_path = output_dir / C("logging.excel_filename", "luma_results.xlsx")
@@ -318,24 +494,37 @@ def main():
         df.to_excel(writer, sheet_name='all_results', index=False)
         df_grouped.to_excel(writer, sheet_name='grouped_results', index=False)
     
-    # Print summary
+    # ========================================
+    # Print Summary
+    # ========================================
     print("\n" + "="*70)
     print("EXPERIMENT SUMMARY")
     print("="*70)
     
     # Display key metrics
-    metrics_to_show = ['fused_accuracy', 'fused_evidence_mean', 'fused_aleatoric_mean', 'fused_epistemic_mean']
+    key_metrics = [
+        'fused_accuracy',
+        'fused_evidence_mean',
+        'fused_aleatoric_mean',
+        'fused_epistemic_mean'
+    ]
     
-    for metric in metrics_to_show:
+    print("\nResults by model (mean ± std across seeds):")
+    print("-" * 70)
+    
+    for metric in key_metrics:
         if metric in df.columns:
-            print(f"\n{metric.upper().replace('_', ' ')}:")
+            print(f"\n{metric.replace('_', ' ').upper()}:")
             summary = df.groupby('model')[metric].agg(['mean', 'std'])
-            print(summary.to_string())
+            for model_name in summary.index:
+                mean_val = summary.loc[model_name, 'mean']
+                std_val = summary.loc[model_name, 'std']
+                print(f"  {model_name:15s}: {mean_val:.4f} ± {std_val:.4f}")
     
     print(f"\n{'='*70}")
     print(f"✓ Experiments completed successfully!")
     print(f"  Results saved to: {excel_path}")
-    print(f"  Checkpoints saved to: {Path(C('logging.checkpoint_dir', 'checkpoints'))}")
+    print(f"  Checkpoints saved to: {checkpoint_dir}")
     print(f"{'='*70}\n")
 
 
