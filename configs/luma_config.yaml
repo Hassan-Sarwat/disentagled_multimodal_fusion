@@ -1,0 +1,23 @@
+data_path: C:\Users\the25th\Documents\TUM\thesis\disentagled_multimodal_fusion\data\luma_raw
+label_noise:
+  add_noise_test: false
+  add_noise_train: false
+  ratio: 0.0
+modalities:
+  audio: true
+  image: true
+  text: true
+noise:
+  add_noise_test: false
+  add_noise_train: false
+ood:
+  add_ood: false
+  ratio: 0.0
+output_path: C:\Users\the25th\Documents\TUM\thesis\disentagled_multimodal_fusion\data\luma_compiled
+test_samples_per_class: 100
+train_samples_per_class: 500
+experiment:
+  seeds: [0]
+dmvae:
+  num_epochs: 3
+  

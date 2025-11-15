@@ -1,24 +1,37 @@
-data_path: C:\Users\the25th\Documents\TUM\thesis\disentagled_multimodal_fusion\data\luma_raw
-label_noise:
-  add_noise_test: false
-  add_noise_train: false
-  ratio: 0.0
-modalities:
-  audio: true
-  image: true
-  text: true
-noise:
-  add_noise_test: false
-  add_noise_train: false
-ood:
-  add_ood: false
-  ratio: 0.0
-output_path: C:\Users\the25th\Documents\TUM\thesis\disentagled_multimodal_fusion\data\luma_compiled
-test_samples_per_class: 100
-train_samples_per_class: 500
-experiment:
-  seeds: [0]
-
-dmvae:
-  num_epochs: 3
-  
+audio:
+  audio_csv_path: data\luma_raw\audio\datalist.csv
+  audio_data_path: data\luma_raw\audio
+  audio_features_path: data\luma_compiled\audio_features.npy
+  audio_ood_csv_path: data\luma_compiled\audio_ood.csv
+  audio_test_csv_path: data\luma_compiled\audio_test.csv
+  audio_train_csv_path: data\luma_compiled\audio_train.csv
+  diversity:
+    compactness: 0
+  label_switch_prob: 0.0
+  sample_noise: &id001
+    add_noise_test: false
+    add_noise_train: false
+data:
+  conflict: null
+  data_dir: C:\Users\the25th\Documents\TUM\thesis\disentagled_multimodal_fusion\data\luma_raw
+  seed: 42
+image:
+  diversity:
+    compactness: 0
+  image_data_path: data\luma_raw\edm_images.pickle
+  image_features_path: data\luma_compiled\image_features.npy
+  image_ood_path: data\luma_compiled\image_ood.pickle
+  image_test_path: data\luma_compiled\image_test.pickle
+  image_train_path: data\luma_compiled\image_train.pickle
+  label_switch_prob: 0.0
+  sample_noise: *id001
+text:
+  diversity:
+    compactness: 0
+  label_switch_prob: 0.0
+  sample_noise: *id001
+  text_features_path: data\luma_compiled\text_features.npy
+  text_ood_tsv_path: data\luma_compiled\text_ood.tsv
+  text_test_tsv_path: data\luma_compiled\text_test.tsv
+  text_train_tsv_path: data\luma_compiled\text_train.tsv
+  text_tsv_path: data\luma_raw\text_data.tsv

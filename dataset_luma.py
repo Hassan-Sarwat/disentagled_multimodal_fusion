@@ -42,6 +42,9 @@ class LUMADataset(Dataset):
     LUMA Multimodal Dataset for Uncertainty Quantification.
     
     Loads and provides access to audio, text, and image modalities.
+    
+    Returns data in the same format as MultiViewDataset from dataset.py:
+    __getitem__ returns a flat list: [modal0, modal1, modal2, label]
     """
     
     def __init__(
@@ -139,11 +142,11 @@ class LUMADataset(Dataset):
         # Load image data (EDM generated + CIFAR)
         edm_pickle_path = self.data_path / 'edm_images.pickle'
         if edm_pickle_path.exists():
-            with open(edm_pickle_path, 'rb') as f:
-                self.edm_df = pickle.load(f)
+            # This file contains all image data, not just EDM.
+            self.image_df = pd.read_pickle(edm_pickle_path)
         else:
             warnings.warn(f"EDM images not found at {edm_pickle_path}")
-            self.edm_df = None
+            self.image_df = None
         
         # Organize data by class and split
         self._organize_by_class()
@@ -155,7 +158,11 @@ class LUMADataset(Dataset):
         """
         # Get unique classes
         audio_labels = self.audio_df['label'].unique()
-        text_labels = self.text_df['label'].unique() if 'label' in self.text_df.columns else audio_labels
+        if 'label' in self.text_df.columns:
+            text_labels = self.text_df['label'].unique()
+        else:
+            # Fallback if text_data.tsv has no labels
+            text_labels = audio_labels
         
         # Find common classes across modalities
         common_classes = sorted(set(audio_labels) & set(text_labels))
@@ -179,6 +186,7 @@ class LUMADataset(Dataset):
             # Get samples for this class from each modality
             audio_samples = self.audio_df[self.audio_df['label'] == class_label]
             text_samples = self.text_df[self.text_df['label'] == class_label] if 'label' in self.text_df.columns else None
+            image_samples = self.image_df[self.image_df['label'] == class_label] if self.image_df is not None else None
             
             # Determine split
             if self.split == 'train':
@@ -186,18 +194,23 @@ class LUMADataset(Dataset):
                 audio_samples = audio_samples.iloc[:500]
                 if text_samples is not None:
                     text_samples = text_samples.iloc[:500]
+                if image_samples is not None:
+                    image_samples = image_samples.iloc[:500]
             else:  # test
                 # Use last 100 samples for testing
                 audio_samples = audio_samples.iloc[500:600]
                 if text_samples is not None:
                     text_samples = text_samples.iloc[500:600]
+                if image_samples is not None:
+                    image_samples = image_samples.iloc[500:600]
             
             # Create sample tuples (audio_idx, text_idx, label)
             n_samples = len(audio_samples)
             for i in range(n_samples):
                 audio_idx = audio_samples.iloc[i].name
                 text_idx = text_samples.iloc[i].name if text_samples is not None else i
-                
+                image_idx = image_samples.iloc[i].name if image_samples is not None else -1
+
                 self.samples.append({
                     'audio_idx': audio_idx,
                     'text_idx': text_idx,
@@ -227,37 +240,19 @@ class LUMADataset(Dataset):
         Load and process audio file.
         
         Returns:
-            Tensor of shape (n_mfcc,) or (n_mels,) depending on config
+            Tensor of audio features (MFCC or mel spectrogram)
         """
         audio_info = self.audio_df.iloc[audio_idx]
-        audio_rel_path = audio_info['path']  # e.g., 'cv_audio/bird/103.wav'
+        filepath = Path(audio_info['filepath'])
         
-        # Try to find audio file in compiled directory first
-        audio_path = self.data_path / audio_rel_path
+        # Handle both absolute and relative paths in the datalist
+        if filepath.is_absolute():
+            audio_path = filepath
+        else:
+            audio_path = self.data_path / filepath
         
-        # If not found, check if there's an audio_path.txt reference
-        if not audio_path.exists():
-            audio_path_ref = self.data_path / 'audio_path.txt'
-            if audio_path_ref.exists():
-                # Read the original audio directory path
-                # This points to data/luma_raw/audio
-                with open(audio_path_ref, 'r') as f:
-                    original_audio_dir = Path(f.read().strip())
-                
-                # The paths in datalist are like 'cv_audio/bird/103.wav'
-                # And the actual structure is: data/luma_raw/audio/cv_audio/bird/103.wav
-                # So we use: original_audio_dir / audio_rel_path
-                audio_path = original_audio_dir / audio_rel_path
-        
-        if not audio_path.exists():
-            # Some audio files in the datalist might not exist
-            # Return zero features as a fallback
-            warnings.warn(f"Audio file not found (using zeros): {audio_path}")
-            n_features = self.audio_config['n_mfcc'] if self.audio_config.get('use_mfcc') else self.audio_config.get('n_mels', 128)
-            return torch.zeros(n_features)
-        
-        # Load audio waveform
-        waveform, sample_rate = torchaudio.load(str(audio_path))
+        # Load audio
+        waveform, sample_rate = torchaudio.load(audio_path)
         
         # Resample if necessary
         if sample_rate != self.audio_config['sample_rate']:
@@ -268,25 +263,21 @@ class LUMADataset(Dataset):
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
         
-        # Truncate or pad to max_length
-        max_samples = int(self.audio_config['max_length'] * self.audio_config['sample_rate'])
-        if waveform.shape[1] > max_samples:
-            waveform = waveform[:, :max_samples]
-        elif waveform.shape[1] < max_samples:
-            padding = max_samples - waveform.shape[1]
+        # Trim or pad to max_length
+        target_length = int(self.audio_config['max_length'] * self.audio_config['sample_rate'])
+        if waveform.shape[1] > target_length:
+            waveform = waveform[:, :target_length]
+        elif waveform.shape[1] < target_length:
+            padding = target_length - waveform.shape[1]
             waveform = torch.nn.functional.pad(waveform, (0, padding))
         
         # Extract features
         if self.audio_config.get('use_mfcc', True):
             # MFCC features
-            # n_mels must be >= n_mfcc
-            n_mfcc = self.audio_config['n_mfcc']
-            n_mels = max(n_mfcc + 10, self.audio_config.get('n_mels', 128))  # Ensure n_mels > n_mfcc
-            
             mfcc_transform = torchaudio.transforms.MFCC(
                 sample_rate=self.audio_config['sample_rate'],
-                n_mfcc=n_mfcc,
-                melkwargs={'n_fft': 400, 'hop_length': 160, 'n_mels': n_mels}
+                n_mfcc=self.audio_config['n_mfcc'],
+                melkwargs={'n_mels': 40, 'n_fft': 400}
             )
             features = mfcc_transform(waveform)
             # Average over time dimension
@@ -308,13 +299,15 @@ class LUMADataset(Dataset):
         Load and encode text.
         
         Returns:
-            Tensor of text features
+            Tensor of text features (simple embedding, not pretrained BERT)
         """
         text_info = self.text_df.iloc[text_idx]
         text = text_info['text']
         
+        # For DMVAE compatibility, we need to return a simple float vector
+        # NOT token IDs that need embedding layers
         if self.tokenizer is not None:
-            # Use pretrained tokenizer
+            # Use pretrained tokenizer to get token IDs
             encoding = self.tokenizer(
                 text,
                 max_length=self.text_config['max_length'],
@@ -322,18 +315,22 @@ class LUMADataset(Dataset):
                 truncation=True,
                 return_tensors='pt'
             )
-            # Return input_ids as features (we'll encode later in the model)
-            return encoding['input_ids'].squeeze(0)
+            # Convert token IDs to simple features (normalized to [0,1])
+            token_ids = encoding['input_ids'].squeeze(0).float()
+            # Normalize to reasonable range for DMVAE
+            token_features = token_ids / self.tokenizer.vocab_size
+            return token_features
         else:
             # Simple word-level tokenization
             words = text.lower().split()
-            # Create simple vocabulary index (this is very basic)
-            # In practice, you'd want a proper vocabulary
+            # Create simple vocabulary index
             word_ids = [hash(word) % 10000 for word in words[:self.text_config['max_length']]]
             # Pad to max_length
             if len(word_ids) < self.text_config['max_length']:
                 word_ids += [0] * (self.text_config['max_length'] - len(word_ids))
-            return torch.tensor(word_ids, dtype=torch.long)
+            # Normalize to [0, 1] range
+            word_features = torch.tensor(word_ids, dtype=torch.float32) / 10000.0
+            return word_features
     
     def _load_image(self, label_idx: int, sample_idx: int) -> torch.Tensor:
         """
@@ -345,35 +342,34 @@ class LUMADataset(Dataset):
         Returns:
             Tensor of shape (H*W*C,) - flattened image
         """
-        # TODO: Implement proper image loading from CIFAR/EDM
-        # For now, create a random image placeholder
-        if self.edm_df is not None:
-            # Try to load from EDM dataframe
-            class_name = self.idx_to_label[label_idx]
-            # Filter EDM images for this class
-            # This is a placeholder - actual implementation depends on EDM structure
-            pass
-        
-        # Placeholder: Create a random image
-        # In practice, load actual CIFAR images
-        img = Image.new('RGB', self.image_config['size'], color=(128, 128, 128))
+        sample_info = self.samples[sample_idx]
+        image_idx = sample_info.get('image_idx', -1)
+
+        if self.image_df is not None and image_idx != -1:
+            # Load image from the DataFrame
+            # The 'image' column contains numpy arrays of shape (32, 32, 3)
+            img_array = self.image_df.loc[image_idx, 'image']
+            img = Image.fromarray(img_array)
+        else:
+            # Fallback to a placeholder if image data is missing
+            warnings.warn(f"Image for sample {sample_idx} not found, using placeholder.")
+            img = Image.new('RGB', self.image_config['size'], color=(128, 128, 128))
+
         img_tensor = self.image_transform(img)  # Shape: (3, H, W)
         
         # Flatten to (C*H*W,) for the model
         img_flat = img_tensor.flatten()
         
         return img_flat
-    
     def __len__(self) -> int:
         return len(self.samples)
     
-    def __getitem__(self, idx: int) -> Tuple[List[torch.Tensor], int]:
+    def __getitem__(self, idx: int):
         """
         Get a multimodal sample.
         
-        Returns:
-            views: List of [audio_features, text_features, image_features]
-            label: Class label (int)
+        Returns a flat list: [audio_features, text_features, image_features, label]
+        This matches the structure of MultiViewDataset in dataset.py
         """
         sample = self.samples[idx]
         
@@ -382,10 +378,17 @@ class LUMADataset(Dataset):
         text_features = self._load_text(sample['text_idx'])
         image_features = self._load_image(sample['label'], idx)
         
-        views = [audio_features, text_features, image_features]
         label = sample['label']
         
-        return views, label
+        # CRITICAL: Return as flat list, not tuple
+        # This matches MultiViewDataset.__getitem__ behavior
+        # Each feature is already a tensor, label is int
+        return [
+            audio_features.float(),   # Shape: (n_mfcc,)
+            text_features.float(),    # Shape: (max_length,)
+            image_features.float(),   # Shape: (3*H*W,)
+            label                     # int
+        ]
     
     @property
     def num_views(self) -> int:
@@ -393,42 +396,17 @@ class LUMADataset(Dataset):
         return 3
     
     @property
-    def dims(self) -> List[int]:
-        """Dimension of each modality."""
-        # Return approximate dimensions (will be determined at runtime)
+    def dims(self) -> np.ndarray:
+        """
+        Dimension of each modality.
+        Returns numpy array for compatibility with dataset.py
+        """
         audio_dim = self.audio_config['n_mfcc'] if self.audio_config.get('use_mfcc') else self.audio_config.get('n_mels', 128)
         text_dim = self.text_config['max_length']
         image_dim = self.image_config['size'][0] * self.image_config['size'][1] * 3
-        return [audio_dim, text_dim, image_dim]
-
-
-def luma_collate_fn(batch):
-    """
-    Custom collate function to format batch for DMVAE.
-    
-    Input: list of tuples [(views, label), ...]
-           where views = [audio_tensor, text_tensor, image_tensor]
-    Output: flat list [x0_batch, x1_batch, x2_batch, labels_batch]
-    """
-    views_list = [item[0] for item in batch]  # list of [audio, text, image]
-    labels = [item[1] for item in batch]
-    
-    # Stack each modality separately
-    num_modalities = len(views_list[0])
-    modality_batches = []
-    
-    for i in range(num_modalities):
-        modality_data = torch.stack([views[i] for views in views_list])
-        # Ensure float32 for all modalities (text will be converted from int64)
-        if i == 1:  # Text modality - keep as int64 for now, will convert in model if needed
-            modality_batches.append(modality_data.long())
-        else:
-            modality_batches.append(modality_data.float())
-    
-    labels_batch = torch.tensor(labels, dtype=torch.long)
-    
-    # Return as flat list: [x0, x1, x2, labels]
-    return modality_batches + [labels_batch]
+        
+        # Return as numpy array with shape (3, 1) to match MultiViewDataset.get_dims()
+        return np.array([[audio_dim], [text_dim], [image_dim]])
 
 
 def get_luma_dataloaders(
@@ -440,7 +418,7 @@ def get_luma_dataloaders(
     num_workers: int = 4,
     train_frac: float = 0.8,
     use_ood: bool = False,
-) -> Tuple[DataLoader, DataLoader, int, int, List[int]]:
+) -> Tuple[DataLoader, DataLoader, int, int, np.ndarray]:
     """
     Create train and test dataloaders for LUMA dataset.
     
@@ -459,7 +437,7 @@ def get_luma_dataloaders(
         test_loader: Testing dataloader
         num_classes: Number of classes
         num_views: Number of modalities (always 3 for LUMA)
-        dims: List of dimensions for each modality
+        dims: Array of dimensions for each modality
     """
     # Create datasets
     train_dataset = LUMADataset(
@@ -480,14 +458,14 @@ def get_luma_dataloaders(
         use_ood=use_ood,
     )
     
-    # Create dataloaders
+    # Create dataloaders WITHOUT custom collate_fn
+    # The default collate_fn will work correctly with our flat list structure
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        collate_fn=luma_collate_fn,  # Use custom collate function
     )
     
     test_loader = DataLoader(
@@ -496,7 +474,6 @@ def get_luma_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
-        collate_fn=luma_collate_fn,  # Use custom collate function
     )
     
     num_classes = train_dataset.num_classes

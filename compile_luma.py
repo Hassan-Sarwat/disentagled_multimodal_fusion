@@ -47,6 +47,28 @@ LUMA_CONFIG = {
 }
 
 
+def check_nltk_data():
+    """Check for NLTK data and download 'wordnet' if missing."""
+    try:
+        import nltk
+        # Check for a resource that is likely to be used, like 'wordnet' from the error
+        nltk.data.find('corpora/wordnet.zip')
+        print("  ✓ NLTK 'wordnet' resource found.")
+    except LookupError:
+        print("  NLTK 'wordnet' resource not found. Downloading...")
+        try:
+            nltk.download('wordnet', quiet=True)
+            # Verify download
+            nltk.data.find('corpora/wordnet.zip')
+            print("  ✓ Successfully downloaded 'wordnet'.")
+        except Exception as e:
+            print(f"  ✗ Error downloading NLTK data: {e}")
+            print("  Please try running this command in a Python shell:")
+            print("  >>> import nltk")
+            print("  >>> nltk.download('wordnet')")
+            sys.exit(1)
+
+
 def check_luma_repo():
     """Check if LUMA repository is available, if not clone it."""
     luma_repo_path = Path('external/LUMA')
@@ -103,19 +125,44 @@ def create_config_file(luma_repo_path):
     config_path.parent.mkdir(parents=True, exist_ok=True)
     
     # Create config based on LUMA_CONFIG
+    # This structure must match what external/LUMA/compile_dataset.py expects
     compile_config = {
-        'data_path': str(Path(LUMA_CONFIG['data_path']).absolute()),
-        'output_path': str(Path(LUMA_CONFIG['output_path']).absolute()),
-        'train_samples_per_class': LUMA_CONFIG['train_samples_per_class'],
-        'test_samples_per_class': LUMA_CONFIG['test_samples_per_class'],
-        'modalities': {
-            'audio': LUMA_CONFIG['use_audio'],
-            'text': LUMA_CONFIG['use_text'],
-            'image': LUMA_CONFIG['use_image'],
+        'data': {
+            'data_dir': str(Path(LUMA_CONFIG['data_path']).absolute()),
+            'seed': 42,
+            'conflict': None,
         },
-        'noise': LUMA_CONFIG['sample_noise'],
-        'label_noise': LUMA_CONFIG['label_noise'],
-        'ood': LUMA_CONFIG['ood_samples'],
+        'audio': {
+            'audio_csv_path': str(Path(LUMA_CONFIG['data_path']) / 'audio' / 'datalist.csv'),
+            'audio_test_csv_path': str(Path(LUMA_CONFIG['output_path']) / 'audio_test.csv'),
+            'audio_data_path': str(Path(LUMA_CONFIG['data_path']) / 'audio'),
+            'audio_features_path': str(Path(LUMA_CONFIG['output_path']) / 'audio_features.npy'),
+            'diversity': {'compactness': 0},
+            'sample_noise': LUMA_CONFIG['sample_noise'],
+            'label_switch_prob': 0.0,
+            'audio_train_csv_path': str(Path(LUMA_CONFIG['output_path']) / 'audio_train.csv'),
+            'audio_ood_csv_path': str(Path(LUMA_CONFIG['output_path']) / 'audio_ood.csv'),
+        },
+        'text': {
+            'text_tsv_path': str(Path(LUMA_CONFIG['data_path']) / 'text_data.tsv'),
+            'text_test_tsv_path': str(Path(LUMA_CONFIG['output_path']) / 'text_test.tsv'),
+            'text_features_path': str(Path(LUMA_CONFIG['output_path']) / 'text_features.npy'),
+            'diversity': {'compactness': 0},
+            'sample_noise': LUMA_CONFIG['sample_noise'],
+            'label_switch_prob': 0.0,
+            'text_train_tsv_path': str(Path(LUMA_CONFIG['output_path']) / 'text_train.tsv'),
+            'text_ood_tsv_path': str(Path(LUMA_CONFIG['output_path']) / 'text_ood.tsv'),
+        },
+        'image': {
+            'image_data_path': str(Path(LUMA_CONFIG['data_path']) / 'edm_images.pickle'),
+            'image_test_path': str(Path(LUMA_CONFIG['output_path']) / 'image_test.pickle'),
+            'image_features_path': str(Path(LUMA_CONFIG['output_path']) / 'image_features.npy'),
+            'diversity': {'compactness': 0},
+            'sample_noise': LUMA_CONFIG['sample_noise'],
+            'label_switch_prob': 0.0,
+            'image_train_path': str(Path(LUMA_CONFIG['output_path']) / 'image_train.pickle'),
+            'image_ood_path': str(Path(LUMA_CONFIG['output_path']) / 'image_ood.pickle'),
+        }
     }
     
     with open(config_path, 'w') as f:
@@ -182,11 +229,54 @@ def create_simplified_dataset():
     
     print("\nCreating simplified dataset structure...")
     
-    # Copy audio datalist
+    # Copy audio datalist and handle audio files
     audio_csv = raw_path / 'audio' / 'datalist.csv'
     if audio_csv.exists():
-        shutil.copy(audio_csv, output_path / 'audio_datalist.csv')
-        print(f"  ✓ Copied audio datalist")
+        output_audio_dir = output_path / 'audio'
+        raw_audio_dir = raw_path / 'audio'
+        
+        # Try to create a symlink to avoid copying large audio files
+        if raw_audio_dir.exists():
+            try:
+                if output_audio_dir.exists():
+                    if output_audio_dir.is_symlink():
+                        output_audio_dir.unlink()
+                    else:
+                        shutil.rmtree(output_audio_dir)
+                
+                # Create symlink (requires Windows developer mode or admin)
+                output_audio_dir.symlink_to(raw_audio_dir.absolute(), target_is_directory=True)
+                print(f"  ✓ Created audio directory symlink")
+                
+                # Copy datalist as-is since symlink works
+                shutil.copy(audio_csv, output_path / 'audio_datalist.csv')
+                print(f"  ✓ Copied audio datalist")
+                
+            except (OSError, NotImplementedError) as e:
+                # Symlink failed - update datalist with absolute paths instead
+                print(f"  ℹ Symlink not supported, using absolute paths in datalist...")
+                df = pd.read_csv(audio_csv)
+                
+                # Find the path column
+                path_col = None
+                for col in ['path', 'file_path', 'filepath', 'audio_path']:
+                    if col in df.columns:
+                        path_col = col
+                        break
+                
+                if path_col:
+                    # Convert relative paths to absolute paths
+                    df[path_col] = df[path_col].apply(
+                        lambda p: str((raw_path / 'audio' / p).absolute()) if not Path(p).is_absolute() else p
+                    )
+                    df.to_csv(output_path / 'audio_datalist.csv', index=False)
+                    print(f"  ✓ Updated audio datalist with absolute paths (column: {path_col})")
+                else:
+                    shutil.copy(audio_csv, output_path / 'audio_datalist.csv')
+                    print(f"  ⚠ Copied audio datalist as-is (no path column found)")
+        else:
+            shutil.copy(audio_csv, output_path / 'audio_datalist.csv')
+            print(f"  ✓ Copied audio datalist")
     
     # Copy text data
     text_tsv = raw_path / 'text_data.tsv'
@@ -228,20 +318,24 @@ def main():
     print("LUMA Dataset Compilation Script")
     print("="*60)
     
-    # Step 1: Check if LUMA repository is available
-    print("\n[1/4] Checking LUMA repository...")
+    # Step 1: Check for NLTK data
+    print("\n[1/5] Checking for required NLTK data...")
+    check_nltk_data()
+
+    # Step 2: Check if LUMA repository is available
+    print("\n[2/5] Checking LUMA repository...")
     luma_repo_path = check_luma_repo()
     
-    # Step 2: Check if raw data has been downloaded
-    print("\n[2/4] Checking raw LUMA data...")
+    # Step 3: Check if raw data has been downloaded
+    print("\n[3/5] Checking raw LUMA data...")
     raw_data_path = check_raw_data()
     
-    # Step 3: Create configuration file
-    print("\n[3/4] Creating compilation configuration...")
+    # Step 4: Create configuration file
+    print("\n[4/5] Creating compilation configuration...")
     config_path = create_config_file(luma_repo_path)
     
-    # Step 4: Compile the dataset
-    print("\n[4/4] Compiling dataset...")
+    # Step 5: Compile the dataset
+    print("\n[5/5] Compiling dataset...")
     output_path = compile_dataset(luma_repo_path, config_path)
     
     print("\n" + "="*60)
