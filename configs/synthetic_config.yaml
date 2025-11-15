@@ -2,23 +2,151 @@ experiment:
   seeds: [0, 1, 2, 3, 4]
   deps: [0, 25, 50, 75, 100]
 
-data:
+### These are tuned to medium difficulty
+
+Perfect! Here's your config file with easy, medium, and hard difficulty presets, with clear explanations:
+yamldata:
+  # ════════════════════════════════════════════════════════════════════
+  # DIFFICULTY PRESETS - Synthetic Data Generation
+  # ════════════════════════════════════════════════════════════════════
+  # Choose based on your testing needs:
+  # - common_easy: ~90-98% accuracy, good for debugging/prototyping
+  # - common_med:  ~70-90% accuracy, realistic/balanced (RECOMMENDED)
+  # - common_hard: ~55-75% accuracy, stress test for robustness
+  # ════════════════════════════════════════════════════════════════════
+
+  # ┌────────────────────────────────────────────────────────────────┐
+  # │ EASY DIFFICULTY                                                │
+  # │ Use for: Quick validation, debugging, proof-of-concept         │
+  # │ Expected accuracy: 90-98%                                      │
+  # └────────────────────────────────────────────────────────────────┘
+  common_easy:
+    n_samples: 10000
+    
+    # Signal structure: Less junk, more signal
+    d_signal: 16              # Informative dimensions
+    d_spurious: 4             # ← REDUCED from 16 (less distraction)
+    
+    # Amplitude scaling: Stronger signals
+    alpha_shared: 0.9         # ← INCREASED from 0.7 (shared louder)
+    beta_specific: 0.8        # ← INCREASED from 0.6 (private louder)
+    
+    # Class separation: Well-separated clusters
+    class_sep_shared: 1.5     # ← INCREASED from 1.1 (classes farther)
+    class_sep_private: 1.3    # ← INCREASED from 0.9 (classes farther)
+    
+    # Noise: Cleaner observations
+    noise_std: 0.3            # ← REDUCED from 0.7 (less noise)
+    hetero_noise: false       # ← DISABLED (uniform noise)
+    hetero_scale: 0.2         # (not used when hetero_noise=false)
+    
+    # Nonlinearity: Keep it simple
+    nonlinear_shared: false   # ← DISABLED (linear separation OK)
+    nonlinear_specific: false # ← Keep disabled
+    
+    # Cross-modal conflict: Minimal disagreement
+    conflict_frac: 0.1        # ← REDUCED from 0.4 (only 10% classes)
+    conflict_strength: 0.3    # ← REDUCED from 0.7 (weak rotation)
+
+  # ┌────────────────────────────────────────────────────────────────┐
+  # │ MEDIUM DIFFICULTY (RECOMMENDED)                                │
+  # │ Use for: Main experiments, paper results, benchmarking         │
+  # │ Expected accuracy: 70-90%                                      │
+  # └────────────────────────────────────────────────────────────────┘
   common_med:
     n_samples: 10000
-    d_signal: 16
-    d_spurious: 16
-    alpha_shared: 0.7
-    beta_specific: 0.6
-    class_sep_shared: 1.1
-    class_sep_private: 0.9
-    noise_std: 0.7
-    hetero_noise: true
-    hetero_scale: 0.4
-    nonlinear_shared: true
-    nonlinear_specific: false
-    conflict_frac: 0.4
-    conflict_strength: 0.7
+    
+    # Signal structure: Balanced signal-to-noise
+    d_signal: 16              # Informative dimensions
+    d_spurious: 16            # Equal junk (50% distraction)
+    
+    # Amplitude scaling: Moderate signals
+    alpha_shared: 0.7         # Shared channel weight
+    beta_specific: 0.6        # Private channel weight
+    
+    # Class separation: Realistic separation
+    class_sep_shared: 1.1     # Shared classes moderately separated
+    class_sep_private: 0.9    # Private classes closer together
+    
+    # Noise: Realistic corruption
+    noise_std: 0.7            # Medium observation noise
+    hetero_noise: true        # Variable noise per sample
+    hetero_scale: 0.4         # Noise varies by ±40%
+    
+    # Nonlinearity: Shared channel warped
+    nonlinear_shared: true    # Apply tanh to shared (nonlinear)
+    nonlinear_specific: false # Keep private linear
+    
+    # Cross-modal conflict: Moderate disagreement
+    conflict_frac: 0.4        # 40% of classes have conflict
+    conflict_strength: 0.7    # Strong rotation (70%)
 
+  # ┌────────────────────────────────────────────────────────────────┐
+  # │ HARD DIFFICULTY                                                │
+  # │ Use for: Stress testing, robustness evaluation, edge cases     │
+  # │ Expected accuracy: 55-75%                                      │
+  # └────────────────────────────────────────────────────────────────┘
+  common_hard:
+    n_samples: 10000
+    
+    # Signal structure: More junk than signal
+    d_signal: 16              # Informative dimensions
+    d_spurious: 48            # ← INCREASED from 16 (75% distraction!)
+    
+    # Amplitude scaling: Weaker signals
+    alpha_shared: 0.5         # ← REDUCED from 0.7 (shared quieter)
+    beta_specific: 0.4        # ← REDUCED from 0.6 (private quieter)
+    
+    # Class separation: Closer clusters
+    class_sep_shared: 0.8     # ← REDUCED from 1.1 (classes closer)
+    class_sep_private: 0.6    # ← REDUCED from 0.9 (classes closer)
+    
+    # Noise: Heavy corruption
+    noise_std: 1.2            # ← INCREASED from 0.7 (more noise)
+    hetero_noise: true        # ← Keep enabled
+    hetero_scale: 0.6         # ← INCREASED from 0.4 (±60% variation)
+    
+    # Nonlinearity: Both channels warped
+    nonlinear_shared: true    # ← Keep enabled
+    nonlinear_specific: true  # ← ENABLED (private also nonlinear)
+    
+    # Cross-modal conflict: Heavy disagreement
+    conflict_frac: 0.7        # ← INCREASED from 0.4 (70% classes)
+    conflict_strength: 0.9    # ← INCREASED from 0.7 (near-full rotation)
+
+
+# ════════════════════════════════════════════════════════════════════
+# PARAMETER REFERENCE GUIDE
+# ════════════════════════════════════════════════════════════════════
+#
+# d_signal:          Number of informative dimensions (contains S₀, E, class info)
+# d_spurious:        Number of junk dimensions (random noise, no class info)
+#                    → Higher = more distraction
+#
+# alpha_shared:      Amplitude multiplier for shared channel [0-1]
+# beta_specific:     Amplitude multiplier for private channel [0-1]
+#                    → Higher = stronger signal
+#
+# class_sep_shared:  Scale of shared class means (how far apart classes are)
+# class_sep_private: Scale of private class means
+#                    → Higher = easier classification
+#
+# noise_std:         Observation noise standard deviation
+#                    → Higher = more corruption
+#
+# hetero_noise:      If true, noise varies per sample (more realistic)
+# hetero_scale:      Noise variation range [noise_std × (1±hetero_scale)]
+#                    → Higher = more variable quality
+#
+# nonlinear_shared:  Apply tanh() to shared channel (breaks linear separability)
+# nonlinear_specific: Apply tanh() to private channels
+#                    → true = need nonlinear classifier
+#
+# conflict_frac:     Fraction of classes with cross-modal disagreement [0-1]
+# conflict_strength: How much rotation applied to conflicting classes [0-1]
+#                    → Higher = stronger disagreement between modalities
+#
+# ════════════════════════════════════════════════════════════════════
 dmvae:
   a: 1.0e-5
   hidden_dim: 512

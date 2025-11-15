@@ -349,15 +349,15 @@ class SimpleTwoModalPlus(Dataset):
         class_sep_shared=1.0,      # magnitude of SHARED class means
         class_sep_private=1.0,     # magnitude of PRIVATE class means per modality
         # ------------------------------------------------
-        alpha_shared=0.7,
-        beta_specific=0.6,
-        noise_std=0.8,
-        hetero_noise=True,
-        hetero_scale=0.5,
-        nonlinear_shared=True,
-        nonlinear_specific=False,
-        conflict_frac=0.5,
-        conflict_strength=0.8,
+        alpha_shared=0.7, # Controls strength of shared signal dims
+        beta_specific=0.6, # Controls strength of specific signal dims
+        noise_std=0.8,   # observation noise level
+        hetero_noise=True, # whether to use heteroscedastic noise
+        hetero_scale=0.5, # scale of heteroscedasticity
+        nonlinear_shared=True, # whether to apply nonlinearity to shared signal dims
+        nonlinear_specific=False, # whether to apply nonlinearity to specific signal dims
+        conflict_frac=0.5, # fraction of classes with cross-modal conflict
+        conflict_strength=0.8, # strength of conflict (0=no conflict, 1=full orthogonalization)
         seed=0
     ):
         super().__init__()
