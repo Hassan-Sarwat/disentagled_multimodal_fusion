@@ -4,9 +4,9 @@ import torch
 import torch.nn as nn
 from torchmetrics import Accuracy
 import utils as utils
-from losses import SupConLoss, ortho_loss
+from models.losses import SupConLoss, ortho_loss
 from utils import ExponentialScheduler
-from classifiers import Linear, IdentityEncoder, MLP, ProbabilisticEncoder
+from models.classifiers import Linear, IdentityEncoder, MLP, ProbabilisticEncoder
 
 from utils import augment_data 
 

@@ -6,7 +6,9 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torch.distributions import Normal, Independent
 from utils import initialize_weights, activation_function
 
+
 class IdentityEncoder(nn.Module):
+    """Pass-through encoder that returns input as-is."""
     def forward(self, x):
         return x
 
@@ -17,39 +19,270 @@ class Linear(nn.Module):
 
     Args:
         layers (tuple): A tuple defining the sizes of each layer, e.g., (input_dim, hidden1, hidden2, ..., last_hidden_dim).
-        output_dim (int, optional): The output dimension when intermodality is enabled. Defaults to 128.
-        intermodality (bool, optional): If True, uses output_dim as the final layer size; otherwise, uses num_classes. Defaults to False.
-        dropout (bool, optional): Whether to apply dropout or not. Defaults to False.
-        dropoutp (float, optional): Dropout probability. Defaults to 0.1.
-        intialization (str, optional): The initialization method. Defaults to 'xavier'.
+        output_dims (int, optional): The output dimension. Defaults to 128.
+        dropout (float, optional): Dropout probability. Defaults to 0.1.
+        initialization (str, optional): The initialization method. Defaults to 'xavier'.
     """
 
-    def __init__(self,  dropout=0.1, output_dims=128,  
-                 index=0, layers=(5,10,50), initialization = 'xavier'):
+    def __init__(self, dropout=0.1, output_dims=128, index=0, layers=(5, 10, 50), initialization='xavier'):
         super(Linear, self).__init__()
         self.dropout = dropout
         self.output_dims = output_dims
         self.layers = nn.ModuleList()
+        
         for i in range(len(layers) - 1):
             linear = nn.Linear(layers[i], layers[i+1])         
             self.layers.append(linear)
             self.layers.append(nn.ReLU())
             if self.dropout > 0:
-                # Apply dropout only if specified
                 self.layers.append(nn.Dropout(self.dropout))
+        
         self.layers.append(nn.Linear(layers[-1], output_dims))
         self.layers = initialize_weights(self.layers, initialization)
+    
     def forward(self, x):
         """Forward pass through the MLP."""
         output = x.float() 
         for layer in self.layers:
             output = layer(output)
         return output
+
+
+# =============================================================================
+# LUMA-Style Feature Encoders
+# =============================================================================
+
+class ImageEncoder(nn.Module):
+    """
+    CNN-based image encoder for LUMA dataset.
     
+    Based on the LUMA paper architecture (Figure 11):
+    - Processes 32x32 RGB images from CIFAR-10/100
+    - Uses convolutional layers for feature extraction
+    - Outputs fixed-dimensional embeddings
+    
+    Args:
+        output_dim (int): Output embedding dimension. Defaults to 200.
+        dropout (float): Dropout probability. Defaults to 0.1.
+    """
+    
+    def __init__(self, output_dim=200, dropout=0.1):
+        super(ImageEncoder, self).__init__()
+        self.output_dim = output_dim
+        
+        # Convolutional feature extractor
+        # Input: (batch, 3072) -> reshape to (batch, 3, 32, 32)
+        self.conv_layers = nn.Sequential(
+            # First conv block: 32x32 -> 16x16
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),  # 16x16
+            nn.Dropout2d(dropout),
+            
+            # Second conv block: 16x16 -> 8x8
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),  # 8x8
+            nn.Dropout2d(dropout),
+            
+            # Third conv block: 8x8 -> 4x4
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),  # 4x4
+            nn.Dropout2d(dropout),
+        )
+        
+        # Fully connected layers
+        # 128 channels * 4 * 4 = 2048
+        self.fc_layers = nn.Sequential(
+            nn.Linear(128 * 4 * 4, 512),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(512, output_dim)
+        )
+    
+    def forward(self, x):
+        """
+        Forward pass.
+        
+        Args:
+            x (torch.Tensor): Flattened image tensor of shape (batch, 3072)
+        
+        Returns:
+            torch.Tensor: Encoded features of shape (batch, output_dim)
+        """
+        # Reshape from (batch, 3072) to (batch, 3, 32, 32)
+        batch_size = x.shape[0]
+        x = x.view(batch_size, 3, 32, 32)
+        
+        # Apply conv layers
+        x = self.conv_layers(x)
+        
+        # Flatten
+        x = x.view(batch_size, -1)
+        
+        # Apply FC layers
+        x = self.fc_layers(x)
+        
+        return x
+
+
+class AudioEncoder(nn.Module):
+    """
+    CNN-based audio encoder for LUMA dataset.
+    
+    Based on the LUMA paper architecture (Figure 12):
+    - Processes MFCC features (default: 40 coefficients)
+    - Can work with either 1D MFCC vectors or 2D spectrograms
+    - Outputs fixed-dimensional embeddings
+    
+    Args:
+        input_dim (int): Input MFCC dimension. Defaults to 40.
+        output_dim (int): Output embedding dimension. Defaults to 200.
+        dropout (float): Dropout probability. Defaults to 0.1.
+        use_2d (bool): If True, treat input as 2D spectrogram. Defaults to False (1D MFCC).
+    """
+    
+    def __init__(self, input_dim=40, output_dim=200, dropout=0.1, use_2d=False):
+        super(AudioEncoder, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.use_2d = use_2d
+        
+        if use_2d:
+            # For 2D spectrogram input (e.g., 128x128 mel-spectrogram)
+            # This matches the LUMA paper's approach for audio
+            self.conv_layers = nn.Sequential(
+                nn.Conv2d(1, 32, kernel_size=3, padding=1),
+                nn.BatchNorm2d(32),
+                nn.ReLU(),
+                nn.MaxPool2d(2, 2),
+                nn.Dropout2d(dropout),
+                
+                nn.Conv2d(32, 64, kernel_size=3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.MaxPool2d(2, 2),
+                nn.Dropout2d(dropout),
+                
+                nn.Conv2d(64, 128, kernel_size=3, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool2d(1)  # Global average pooling
+            )
+            
+            self.fc_layers = nn.Sequential(
+                nn.Linear(128, output_dim)
+            )
+        else:
+            # For 1D MFCC input (simpler, more common approach)
+            # Use MLP for MFCC features
+            self.fc_layers = nn.Sequential(
+                nn.Linear(input_dim, 128),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(128, 256),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(256, output_dim)
+            )
+    
+    def forward(self, x):
+        """
+        Forward pass.
+        
+        Args:
+            x (torch.Tensor): Audio features
+                - If use_2d=False: shape (batch, input_dim) - MFCC vector
+                - If use_2d=True: shape (batch, H, W) - spectrogram
+        
+        Returns:
+            torch.Tensor: Encoded features of shape (batch, output_dim)
+        """
+        if self.use_2d:
+            # Add channel dimension if needed
+            if x.dim() == 3:
+                x = x.unsqueeze(1)  # (batch, 1, H, W)
+            
+            x = self.conv_layers(x)
+            x = x.view(x.size(0), -1)  # Flatten
+            x = self.fc_layers(x)
+        else:
+            # Direct MLP processing for MFCC
+            x = self.fc_layers(x)
+        
+        return x
+
+
+class TextEncoder(nn.Module):
+    """
+    MLP-based text encoder for LUMA dataset.
+    
+    Based on the LUMA paper architecture (Figure 13):
+    - Processes pre-computed BERT embeddings (averaged token embeddings)
+    - Uses feed-forward network for final encoding
+    - Outputs fixed-dimensional embeddings
+    
+    Note: The LUMA dataset provides text as token IDs or pre-computed embeddings.
+    This encoder assumes you're working with a fixed-dimensional representation
+    (e.g., mean-pooled BERT embeddings of dimension 768 or token ID sequences 
+    mapped to embeddings).
+    
+    Args:
+        input_dim (int): Input dimension (e.g., 128 for token sequences, 768 for BERT embeddings).
+        output_dim (int): Output embedding dimension. Defaults to 200.
+        dropout (float): Dropout probability. Defaults to 0.1.
+    """
+    
+    def __init__(self, input_dim=128, output_dim=200, dropout=0.1):
+        super(TextEncoder, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        
+        # Feed-forward network for text encoding
+        # LUMA paper uses averaged BERT embeddings -> MLP
+        self.fc_layers = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, output_dim)
+        )
+    
+    def forward(self, x):
+        """
+        Forward pass.
+        
+        Args:
+            x (torch.Tensor): Text features of shape (batch, input_dim)
+                - Could be token IDs mapped to embeddings
+                - Could be pre-computed BERT embeddings
+        
+        Returns:
+            torch.Tensor: Encoded features of shape (batch, output_dim)
+        """
+        x = self.fc_layers(x)
+        return x
+
+
+# Alias for backward compatibility
+MLP = Linear
+
+
+# =============================================================================
+# Probabilistic Encoders (from your original code)
+# =============================================================================
 
 class VonMisesFisher(torch.distributions.Distribution):
     """
-    From the paper "An Information Criterion for Disentanglement of Multimoda Data" / https://arxiv.org/pdf/2410.23996
+    Von Mises-Fisher distribution for hyperspherical latent spaces.
+    From the paper "An Information Criterion for Disentanglement of Multimodal Data"
+    https://arxiv.org/pdf/2410.23996
     """
     arg_constraints = {
         "loc": torch.distributions.constraints.real,
@@ -205,13 +438,14 @@ class VonMisesFisher(torch.distributions.Distribution):
 
     def _log_unnormalized_prob(self, x):
         output = self.scale * (self.loc * x).sum(-1, keepdim=True)
-
         return output.view(*(output.shape[:-1]))
 
 
 class ProbabilisticEncoder(nn.Module):
     """
-    From the paper "An Information Criterion for Disentanglement of Multimoda Data" / https://arxiv.org/pdf/2410.23996
+    Probabilistic encoder wrapping a neural network with a distribution.
+    From the paper "An Information Criterion for Disentanglement of Multimodal Data"
+    https://arxiv.org/pdf/2410.23996
     """
     def __init__(self, net, distribution='normal', vmfkappa=1):
         super().__init__()
@@ -231,36 +465,38 @@ class ProbabilisticEncoder(nn.Module):
             scale = self.vmfkappa * torch.ones(params.shape[0], 1).cuda()
             return VonMisesFisher(loc, scale), params
 
+
 class EvidentialNN(nn.Module):
     """
-    Multi-layer perceptron with a flexible number of layers.
-
+    Evidential neural network for uncertainty quantification.
+    Outputs parameters for Dirichlet distribution.
+    
     Args:
-        layers (tuple): A tuple defining the sizes of each layer, e.g., (input_dim, hidden1, hidden2, ..., last_hidden_dim).
-        output_dim (int, optional): The output dimension when intermodality is enabled. Defaults to 128.
-        intermodality (bool, optional): If True, uses output_dim as the final layer size; otherwise, uses num_classes. Defaults to False.
-        dropout (bool, optional): Whether to apply dropout or not. Defaults to False.
-        dropoutp (float, optional): Dropout probability. Defaults to 0.1.
-        intialization (str, optional): The initialization method. Defaults to 'xavier'.
+        layers (tuple): Hidden layer dimensions.
+        output_dims (int): Number of output classes/parameters.
+        dropout (float): Dropout probability.
+        initialization (str): Weight initialization method.
     """
 
-    def __init__(self,  dropout=0.1, output_dims=10, layers=(100,100), initialization = 'xavier'):
+    def __init__(self, dropout=0.1, output_dims=10, layers=(100, 100), initialization='xavier'):
         super(EvidentialNN, self).__init__()
         self.dropout = dropout
         self.output_dims = output_dims
         self.layers = nn.ModuleList()
+        
         for i in range(len(layers) - 1):
             linear = nn.Linear(layers[i], layers[i+1])
             self.layers.append(linear)
             self.layers.append(nn.ReLU())
             if self.dropout > 0:
-                # Apply dropout only if specified
                 self.layers.append(nn.Dropout(self.dropout))
+        
         self.layers.append(nn.Linear(layers[-1], output_dims))
         self.layers = initialize_weights(self.layers, initialization)
+    
     def forward(self, x):
-        """Forward pass through the MLP."""
+        """Forward pass through the MLP with exponential activation."""
         output = x.float() 
         for layer in self.layers:
             output = layer(output)
-        return activation_function(output,'exp')
+        return activation_function(output, 'exp')

@@ -35,7 +35,7 @@ To add a new dataset to the project, you need to create a custom dataset class t
 
 ### 1. Create a Dataset Class
 
-Your dataset class should be structured as follows. You can add it in a new file or in `dataset.py`.
+Your dataset class should be structured as follows. You can add it in a new file in datasets folder or in `datasets/dataset.py`.
 
 ```python
 import torch

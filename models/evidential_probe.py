@@ -2,9 +2,9 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 from torchmetrics import Accuracy
-from losses import AvgTrustedLoss
+from models.losses import AvgTrustedLoss
 from utils import get_cml_fusion, get_avg_fusion, get_joint_fusion, get_disentangled_fusion
-from classifiers import EvidentialNN
+from models.classifiers import EvidentialNN
 import copy
 
 

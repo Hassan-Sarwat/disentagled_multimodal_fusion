@@ -15,8 +15,8 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import CSVLogger
 import json
 import models.baselines as baselines
-from dataset import CUB, Caltech, HandWritten, PIE, Scene
-from classifiers import IdentityEncoder
+from datasets.dataset import CUB, Caltech, HandWritten, PIE, Scene
+from models.classifiers import IdentityEncoder
 from analysis import evaluate_subjective_model, evaluate_subjective_model_with_shared, build_metrics_dataframe_datasets
 from  models.dmvae import DMVAE
 from models.evidential_probe  import EvidentialProbeModule, DisentangledEvidentialProbeModule

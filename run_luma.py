@@ -1,16 +1,10 @@
-"""
-Main script for running experiments on the LUMA dataset.
-
-This script trains and evaluates multiple fusion methods on the LUMA multimodal dataset
-following the same structure as run.py for consistency.
-"""
-
 import os
 import numpy as np
 import pandas as pd
 from pathlib import Path
 import yaml
 from pprint import pprint
+from functools import partial
 
 import torch
 from torch.utils.data import DataLoader
@@ -21,20 +15,14 @@ from pytorch_lightning.loggers import CSVLogger
 import models.baselines as baselines
 from models.dmvae import DMVAE
 from models.evidential_probe import EvidentialProbeModule, DisentangledEvidentialProbeModule
+from models.classifiers import IdentityEncoder, ImageEncoder, AudioEncoder, TextEncoder
 
-# Import dataset
-from dataset_luma import get_luma_dataloaders
-
-# Import analysis utilities
+from datasets.dataset_luma import get_luma_dataloaders
 from analysis import (
     evaluate_subjective_model, 
     evaluate_subjective_model_with_shared, 
     build_metrics_dataframe_datasets
 )
-
-# Import classifiers
-from classifiers import IdentityEncoder
-from functools import partial
 
 
 # ============================================================================
@@ -208,7 +196,11 @@ def main():
         # Update model parameters with dataset-specific info
         model_parameters["classes"] = num_classes
         model_parameters["output_dims"] = dims
-        model_parameters['classifiers'] = [(IdentityEncoder, {}) for _ in range(len(dims))]
+        model_parameters['classifiers'] = [
+            (AudioEncoder, {'input_dim': 40, 'output_dim': 200, 'dropout': 0.1}),
+            (TextEncoder, {'input_dim': 128, 'output_dim': 200, 'dropout': 0.1}),
+            (ImageEncoder, {'output_dim': 200, 'dropout': 0.1})
+        ]
         model_parameters['lr'] = luma_lr
         
         print(f"  Dataset: LUMA")

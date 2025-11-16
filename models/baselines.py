@@ -2,11 +2,11 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 from torchmetrics import Accuracy, MeanMetric
-from losses import AvgTrustedLoss, SingleEvidentialLoss
+from models.losses import AvgTrustedLoss, SingleEvidentialLoss
 from utils import get_cml_fusion, get_avg_fusion, discounted_belief_fusion
-from classifiers import EvidentialNN
+from models.classifiers import EvidentialNN
 from torch import nn
-from common_fusions import Concat
+from models.common_fusions import Concat
 
 
 class LateFusion(pl.LightningModule):

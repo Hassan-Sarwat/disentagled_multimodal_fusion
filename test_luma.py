@@ -55,7 +55,7 @@ def test_dataset_loading():
     print("="*60)
     
     try:
-        from dataset_luma import get_luma_dataloaders
+        from datasets.dataset_luma import get_luma_dataloaders
         
         print("  Creating dataloaders...")
         train_loader, test_loader, num_classes, num_views, dims = get_luma_dataloaders(

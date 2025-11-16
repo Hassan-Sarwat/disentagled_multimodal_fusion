@@ -4,8 +4,8 @@ from analysis import evaluate_subjective_model, evaluate_subjective_model_with_s
 from models.dmvae import DMVAE
 import models.baselines as baselines
 from models.evidential_probe import EvidentialProbeModule
-from dataset import make_loaders_simple_plus
-from classifiers import IdentityEncoder
+from datasets.dataset import make_loaders_simple_plus
+from models.classifiers import IdentityEncoder
 import yaml
 from pathlib import Path
 

@@ -3,7 +3,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import utils as utils
-from classifiers import Linear, IdentityEncoder
+from models.classifiers import Linear, IdentityEncoder
 import torch.nn.functional as F
 
 torch.set_float32_matmul_precision('medium')

@@ -17,7 +17,5 @@ output_path: C:\Users\the25th\Documents\TUM\thesis\disentagled_multimodal_fusion
 test_samples_per_class: 100
 train_samples_per_class: 500
 experiment:
-  seeds: [0]
-dmvae:
-  num_epochs: 3
+  seeds: [0,1,2,3,4]
   
