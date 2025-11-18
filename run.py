@@ -217,7 +217,7 @@ for seed in seeds:
 
         models = [dis_dmvae_model, cml_dmvae_model, joint_dmvae_model, dbf_fusion, cml_fusion, avg_fusion]
         model_names = ['dmvae_dis','dmvae_cml','dmvae_joint','dbf_fusion','cml_fusion','avg_fusion']
-        
+
         
         for model, name in zip(models, model_names):
             model_name = f'{name}_fusion_ds{dataset_name}_seed{seed}'
@@ -256,7 +256,7 @@ for seed in seeds:
             rows[seed]['Normal'][dataset_name][name].update({'path':path})
 
     rows[seed]['Conflict'] = {}
-    for dataset_name in ['CUB']:#, 'CalTech', 'HandWritten', 'PIE', 'Scene']:
+    for dataset_name in conflict_datasets:
         rows[seed]['Conflict'][dataset_name] = {}
         train_loader, test_loader, num_classes, num_views, dims = get_conflict_data(dataset_name)
         model_parameters["classes"] = num_classes

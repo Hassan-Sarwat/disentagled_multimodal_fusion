@@ -1,6 +1,6 @@
 experiment:
   seeds: [0, 1, 2, 3, 4]
-  normal_datasets: ["CUB", "CalTech", "HandWritten", "PIE", "Scene"]         
+  normal_datasets: ["CUB","CalTech", "HandWritten", "PIE", "Scene"]          
   conflict_datasets: ["CUB", "CalTech", "HandWritten", "PIE", "Scene"]
 
 dataloader:
