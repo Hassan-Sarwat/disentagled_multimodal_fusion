@@ -1,5 +1,6 @@
 dmfu
-data
+data/luma_raw/
+data/luma_compiled/
 __pycache__
 lightning_logs
 logs
